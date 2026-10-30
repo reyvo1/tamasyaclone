@@ -227,10 +227,7 @@ function tamasyaCanonicalTransactionColumns(): array {
 function tamasyaCanonicalCashLegAmount(array $tx): float {
     $amount=max(0.0,round((float)($tx['amount']??0),2));
     if((int)($tx['isSplitPayment']??0)===1){
-        $cash=max(0.0,round((float)($tx['splitCashAmount']??0),2));
-        $transfer=max(0.0,round((float)($tx['splitTransferAmount']??0),2));
-        if(abs(($cash+$transfer)-$amount)>0.01) throw new DomainException('Nominal split payment tidak sesuai total transaksi.');
-        return $cash;
+        return max(0.0,round((float)($tx['splitCashAmount']??0),2));
     }
     $account=strtolower(trim((string)($tx['bankAccountId']??'')));
     return ($account===''||$account==='cash')?$amount:0.0;
