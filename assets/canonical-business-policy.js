@@ -31,7 +31,7 @@
     // Parity with server tamasyaRecognizedRevenueAmount(): explicit valid split
     // takes precedence over taxSnapshotStatus (so unresolved receipts with a
     // known split still expose their DPP for journal/reconciliation).
-    if (Number.isFinite(base) && Number.isFinite(tax) && base >= 0 && tax >= 0 && Math.abs((base + tax) - gross) <= 1) {
+    if (Number.isFinite(base) && Number.isFinite(tax) && base >= 0 && tax >= 0 && Math.abs((base + tax) - gross) <= 0.01) {
       return Math.max(0, Math.round((gross - Math.min(gross, tax)) * 100) / 100);
     }
     const status = lower(tx?.taxSnapshotStatus ?? tx?.tax_snapshot_status ?? 'unresolved');
@@ -83,7 +83,7 @@
     const revenue = recognizedRevenue(tx);
     // A receipt moves cash even while its revenue/tax allocation stays in suspense.
     const isLiquidExternalIncome = isIncome && !isOpeningBalance && !isDepositForfeit
-      && !isTechnicalNonLiquid && (!isInternalTransfer || isOtaTransfer);
+      && !isTechnicalNonLiquid && !isInternalTransfer;
     const isLiquidExternalExpense = isExpense && !isTechnicalNonLiquid && !isInternalTransfer;
 
     let bucket;

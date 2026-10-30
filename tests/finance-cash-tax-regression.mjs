@@ -67,7 +67,7 @@ assert.equal(calc([bankCost],'cash').daily[0].expense,0);
 assert.equal(policy.liquidLegs({...split,isSplitPayment:'false'}).bank,0);
 assert.equal(policy.liquidLegs(receipt('ota',100000,{bankAccountId:'ota_receivable'})).bank,0);
 const special=[receipt('internal',100000,{transactionKind:'internal_transfer'}),receipt('opening',100000,{transactionKind:'opening_balance_cash'}),receipt('held',100000,{transactionKind:'security_deposit_received',taxSnapshotStatus:'not_applicable'}),receipt('ota',100000,{bankAccountId:'ota_receivable'}),receipt('ota-paid',100000,{transactionKind:'ota_transfer',bankAccountId:'transfer'})];
-assert.equal(calc(special).daily[0].income,200000);
+assert.equal(calc(special).daily[0].income,100000);
 const report=read('assets/chunks/report.js');
 const reportLegs=report.slice(report.indexOf('tamasyaReportSplitLegs='),report.indexOf('tamasyaReportMethodLabel='));
 const reportFlow=report.slice(report.indexOf('qs=f.useMemo('),report.indexOf(',tamasyaRevenueParts='));
