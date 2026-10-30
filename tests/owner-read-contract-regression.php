@@ -137,8 +137,8 @@ if (!($pdo instanceof PDO)) {
     $ownerCheck(($ownerSession['readOnly'] ?? false) === true, 'Session Owner ditandai readOnly');
     $ownerCheck(count(array_filter((array)($ownerSession['desktopTabs'] ?? []), static fn($v) => (bool)$v)) >= 15,
         'Owner melihat seluruh tab desktop seperti Admin');
-    $ownerCheck(!array_filter((array)($ownerSession['telegramNotifications'] ?? []), static fn($v) => (bool)$v),
-        'Owner tidak mengirim notifikasi Telegram (mengirim pesan adalah tindakan, bukan pembacaan)');
+    $ownerCheck((bool)array_filter((array)($ownerSession['telegramNotifications'] ?? []), static fn($v) => (bool)$v),
+        'Owner menerima notifikasi Telegram (read-only tetap tidak bisa mutasi)');
     $ownerCheck((bool)($ownerSession['capabilities']['manage_tax_rules'] ?? false) === (bool)($adminPreset['capabilities']['manage_tax_rules'] ?? false),
         'Capability manage_tax_rules Owner sama dengan Admin');
 
