@@ -765,6 +765,7 @@ switch ($action) {
         $roomTypeId = trim((string)($input['roomTypeId'] ?? ''));
         $extraRequest = trim((string)($input['extraRequest'] ?? ''));
         $notes = trim((string)($input['notes'] ?? ''));
+        $promoCode = strtoupper(trim((string)($input['promoCode'] ?? $input['promo_code'] ?? $input['promotionCode'] ?? '')));
         $operationId = trim((string)($GLOBALS['tamasya_request_operation_id'] ?? ($input['operationId'] ?? '')));
         $stayNights = (validIsoDate($checkIn) && validIsoDate($checkOut)) ? (int)((strtotime($checkOut)-strtotime($checkIn))/86400) : 0;
         $publishedRoomTypes = tamasyaPublicRoomTypes($pdo, validIsoDate($checkIn) ? $checkIn : null);
@@ -786,6 +787,27 @@ switch ($action) {
         // Jika inventori tipe kamar terpetakan dan benar-benar habis, hentikan
         // permintaan stale. Bila tipe publik belum dipetakan ke inventori, tetap
         // izinkan pending_review agar resepsionis dapat melakukan konfirmasi manual.
+        if ($promoCode !== '') {
+            if (!tamasyaPromotionCodesEnabled() || !tamasyaPromotionCodesSchemaReady($pdo)) {
+                http_response_code(422); echo json_encode(['success'=>false,'error'=>'Fitur kode promo dinonaktifkan atau schema belum siap.']); break;
+            }
+            $promoStmt = $pdo->prepare("SELECT applies_to,status,valid_from,valid_until FROM promotion_codes WHERE code=? LIMIT 1");
+            $promoStmt->execute([$promoCode]);
+            $promoRow = $promoStmt->fetch(PDO::FETCH_ASSOC);
+            if (!$promoRow || (string)($promoRow['status'] ?? '') !== 'active') {
+                http_response_code(422); echo json_encode(['success'=>false,'error'=>'Kode promo tidak aktif atau tidak ditemukan.']); break;
+            }
+            $today = date('Y-m-d');
+            if (!empty($promoRow['valid_from']) && $today < (string)$promoRow['valid_from']) {
+                http_response_code(422); echo json_encode(['success'=>false,'error'=>'Kode promo belum berlaku.']); break;
+            }
+            if (!empty($promoRow['valid_until']) && $today > (string)$promoRow['valid_until']) {
+                http_response_code(422); echo json_encode(['success'=>false,'error'=>'Kode promo sudah kedaluwarsa.']); break;
+            }
+            if (!in_array((string)($promoRow['applies_to'] ?? ''), ['booking','both'], true)) {
+                http_response_code(422); echo json_encode(['success'=>false,'error'=>'Kode promo tidak berlaku untuk reservasi booking.']); break;
+            }
+        }
         if ($selectedAvailability && (int)($selectedAvailability['totalRooms'] ?? 0) > 0 && empty($selectedAvailability['isAvailable'])) {
             http_response_code(409);
             echo json_encode([
@@ -802,11 +824,11 @@ switch ($action) {
         try {
             $pdo->beginTransaction();
             $stmt = $pdo->prepare("INSERT INTO public_reservation_requests
-                (id,public_request_id,operation_id,guest_name,whatsapp,email,check_in,check_out,guest_count,room_type_id,extra_request,notes,source,status,request_fingerprint,user_agent_hash,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'pending_review',?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)");
+                (id,public_request_id,operation_id,guest_name,whatsapp,email,check_in,check_out,guest_count,room_type_id,extra_request,notes,promo_code,source,status,request_fingerprint,user_agent_hash,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending_review',?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)");
             $stmt->execute([
                 generateServerId('public_reservation'),$publicRequestId,$operationId,$guestName,$whatsapp,$email?:null,$checkIn,$checkOut,$guestCount,$roomTypeId,
-                substr($extraRequest,0,1000),substr($notes,0,2000),'website',$fingerprint,hash('sha256',(string)($_SERVER['HTTP_USER_AGENT']??''))
+                substr($extraRequest,0,1000),substr($notes,0,2000),$promoCode?:null,'website',$fingerprint,hash('sha256',(string)($_SERVER['HTTP_USER_AGENT']??''))
             ]);
             // Notifikasi reservasi publik harus langsung terlihat pada aplikasi,
             // tetapi payload bersama tidak boleh memuat nomor WhatsApp/email karena

@@ -99,7 +99,7 @@ function tamasyaSessionPermissions(array $user, ?PDO $pdo = null) {
         elseif(function_exists('tamasyaRbacRolePermission'))$capabilities[$key]=(bool)tamasyaRbacRolePermission('admin','capabilities',(string)$key,$pdo);
         else $capabilities[$key]=str_starts_with($key,'view_');
     }
-    return ['desktopTabs'=>array_fill_keys($tabs,true),'telegramNotifications'=>array_fill_keys(['bookings','finance','inventory','operations','hr','system'],false),'capabilities'=>$capabilities,'readOnly'=>true];
+    return ['desktopTabs'=>array_fill_keys($tabs,true),'telegramNotifications'=>array_fill_keys(['bookings','finance','inventory','operations','hr','system'],true),'capabilities'=>$capabilities,'readOnly'=>true];
 }
 
 function tamasyaOwnerMutationDenied($user, ?bool $isMutation = null): bool {

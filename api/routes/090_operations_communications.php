@@ -1450,7 +1450,7 @@ switch ($action) {
                         $extras[]=[
                             'id'=>$lateFeeExtraId,'name'=>'Biaya Late Check-out','price'=>$fee,'qty'=>1,'total'=>$fee,
                             'baseAmount'=>$feeTax['baseAmount'],'taxAmount'=>$feeTax['taxAmount'],'taxRate'=>$feeTax['taxRate'],
-                            'taxSnapshotStatus'=>'confirmed','taxSource'=>'live_rule','taxRuleId'=>$rule['ruleId']??null,
+                            'taxSnapshotStatus'=>'confirmed','taxSource'=>'live_rule','taxRuleId'=>$rule['ruleId']??null,'taxRuleName'=>$rule['ruleName']??null,
                             'taxKind'=>'extension','allocationType'=>'room','revenueType'=>'room',
                             'category'=>$feeCategory,'subcategory'=>$feeSubcategory,'paymentStatus'=>'unpaid',
                             'createdAt'=>date('c'),'operationId'=>$requestOperationId

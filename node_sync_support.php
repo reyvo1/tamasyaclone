@@ -806,6 +806,8 @@ function tamasyaNodeSnapshotTableMap(): array {
         'public_site_settings'=>['pk'=>['id']],
         'public_room_types'=>['pk'=>['id']],
         'public_promotions'=>['pk'=>['id']],
+        'promotion_codes'=>['pk'=>['id']],
+        'promotion_code_usages'=>['pk'=>['id']],
         'public_site_media'=>['pk'=>['id']],
         'public_reservation_requests'=>['pk'=>['id']],
         'public_support_conversations'=>['pk'=>['id']],

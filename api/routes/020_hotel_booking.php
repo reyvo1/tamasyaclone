@@ -788,15 +788,21 @@ switch ($action) {
                         $existingTx=$duplicateTx->fetch(PDO::FETCH_ASSOC)?:null;
                         $txId = $existingTx ? (string)$existingTx['id'] : generateServerId('tx_booking');
                         $bookingSemanticKey=$txAction==='extra'?'extra_service':'room_rental';
+                        $bookingChargeRequiresShift=false;
+                        $bookingChargeShiftSessionId=null;
+                        if(!$existingTx){
+                            $bookingChargeRequiresShift=tamasyaManualTransactionRequiresOpenShift(['type'=>'income','amount'=>$txAmt,'bankAccountId'=>$txBank]);
+                            $bookingChargeShiftSessionId=resolveOpenShiftSessionId($pdo,$loggedInStaff,$bookingChargeRequiresShift);
+                        }
                         $txId=tamasyaPostFinancialTransaction($pdo,[
                             'id'=>$txId,'type'=>'income','category'=>$txCat,'categorySystemKey'=>$bookingSemanticKey,'subcategory'=>$txSub,'roomNumber'=>$txRoom,
                             'amount'=>$txAmt,'date'=>$txDate,'description'=>$txDesc,'proofUrl'=>$txProof,'bankAccountId'=>$txBank,'bookingId'=>$id,
                             'createdBy'=>$txBy,'bookingSource'=>$txSource,'baseAmount'=>$tax['baseAmount'],'taxAmount'=>$tax['taxAmount'],'taxRate'=>$tax['taxRate'],
                             'taxSnapshotStatus'=>$tax['taxSnapshotStatus'],'taxSource'=>$tax['taxSource'],'taxRuleId'=>$tax['taxRuleId'],
                             'transactionKind'=>'booking_charge','sourceEntity'=>'booking','sourceEntityId'=>$id,'isSystemGenerated'=>1,
-                            'operationId'=>$txOperationId,'updatedBy'=>$loggedInStaff['id']??null,'updatedSource'=>'web','version'=>1
+                            'operationId'=>$txOperationId,'shiftSessionId'=>$bookingChargeShiftSessionId,'updatedBy'=>$loggedInStaff['id']??null,'updatedSource'=>'web','version'=>1
                         ],$loggedInStaff,'booking',['lockCatalog'=>true,'source'=>'web','idempotentByOperationId'=>true]);
-                        attachTransactionToActorShift($pdo,$txId,$loggedInStaff);
+                        if($bookingChargeShiftSessionId!==null) attachTransactionToActorShift($pdo,$txId,$loggedInStaff,$bookingChargeRequiresShift);
                         if ($txAction === 'extra') {
                             tamasyaAttachBookingExtraPayment(
                                 $pdo,(string)$id,
@@ -1655,8 +1661,6 @@ switch ($action) {
                     ? trim((string)($input['bankAccountId'] ?? ''))
                     : '';
                 $ledgerBeforeSettlement = bookingLedgerTotals($pdo, $id);
-                $requireShiftForSale=(int)$pdo->query("SELECT require_open_shift_for_sale FROM hotel_operational_settings WHERE id='system_default' LIMIT 1")->fetchColumn()===1;
-                $checkoutShiftSessionId=null;
 
                 if ((int)($booking['isOpenEnded'] ?? 0) === 1) {
                     if (!array_key_exists('totalAmount', $input)) {
@@ -1720,8 +1724,6 @@ switch ($action) {
                     if($vacancyReportId==='')throw new RuntimeException('Checkout operasional dengan piutang wajib berasal dari laporan kamar kosong terverifikasi.');
                     if(!in_array($checkoutMode,['field_verified','manager_override'],true))throw new RuntimeException('Mode checkout operasional tidak valid untuk penundaan tagihan.');
                     if(tamasyaStringLength($financialClosureReason)<5)throw new InvalidArgumentException('Alasan piutang checkout minimal 5 karakter.');
-                }elseif($remainingTotalAmount>0){
-                    $checkoutShiftSessionId=resolveOpenShiftSessionId($pdo,$loggedInStaff,$requireShiftForSale);
                 }
                 $bookingVatRate = is_numeric($booking['vatRate'] ?? null) ? max(0.0, (float)$booking['vatRate']) : null;
                 $remainingVatAmount = 0.0;
@@ -1757,27 +1759,33 @@ switch ($action) {
                     $splitCashAmount = isset($input['splitCashAmount']) ? round((float)$input['splitCashAmount'], 2) : 0.0;
                     $splitTransferAmount = isset($input['splitTransferAmount']) ? round((float)$input['splitTransferAmount'], 2) : 0.0;
                     $splitTransferBankAccountId = $input['splitTransferBankAccountId'] ?? null;
-                    $postSettlement=function(string $transactionId,float $postingAmount,string $postingDescription,?string $postingBank,float $postingBase,float $postingTax,string $postingOperation,array $splitSnapshot=[]) use ($pdo,$roomCategoryName,$booking,$roomNumber,$id,$bookingSource,$bookingVatRate,$checkoutShiftSessionId,$loggedInStaff): bool {
+                    $postSettlement=function(string $transactionId,float $postingAmount,string $postingDescription,?string $postingBank,float $postingBase,float $postingTax,string $postingOperation,array $splitSnapshot=[]) use ($pdo,$roomCategoryName,$booking,$roomNumber,$id,$bookingSource,$bookingVatRate,$loggedInStaff): bool {
                         // A lost HTTP response may legitimately replay the same checkout command.
                         // Reuse is allowed only after the central posting authority proves that
                         // the complete financial intent is identical to the committed row.
                         $exists=$pdo->prepare("SELECT id FROM transactions WHERE operationId=? LIMIT 1 FOR UPDATE");
                         $exists->execute([$postingOperation]);
                         $wasExisting=(bool)$exists->fetchColumn();
+                        $postingRequiresShift=!empty($splitSnapshot['isSplitPayment'])
+                            ? ((float)($splitSnapshot['splitCashAmount']??0)>0.009)
+                            : tamasyaManualTransactionRequiresOpenShift(['type'=>'income','amount'=>$postingAmount,'bankAccountId'=>$postingBank]);
+                        $postingShiftSessionId=null;
+                        if(!$wasExisting)$postingShiftSessionId=resolveOpenShiftSessionId($pdo,$loggedInStaff,$postingRequiresShift);
                         // A live booking settlement is covered by
                         // tamasyaAssertLiveTaxSnapshotIntegrity(), which requires the tax
-                        // contract on booking income. Without it this row becomes a poison
-                        // row that blocks every later posting in the hotel.
-                        $settlementTaxRule=resolveConfiguredTaxRule($pdo,$bookingSource,'settlement',date('Y-m-d'));
+                        // contract on booking income. The settlement amount is an
+                        // allocation of the booking's aggregate PBJT snapshot, not a new
+                        // sale under one live rule; the allocation attach below fills the
+                        // final component rule evidence.
                         tamasyaPostFinancialTransaction($pdo,[
                             'id'=>$transactionId,'type'=>'income','category'=>$roomCategoryName,'categorySystemKey'=>'room_rental','subcategory'=>$booking['roomType']??null,
                             'roomNumber'=>$roomNumber,'amount'=>$postingAmount,'date'=>date('Y-m-d'),'description'=>$postingDescription,'createdBy'=>currentStaffLabel($loggedInStaff),
                             'bankAccountId'=>$postingBank,'bookingId'=>$id,'bookingSource'=>$bookingSource,'baseAmount'=>$postingBase,'taxAmount'=>$postingTax,
                             'taxRate'=>$bookingVatRate,'transactionKind'=>'settlement','sourceEntity'=>'booking','sourceEntityId'=>$id,'isSystemGenerated'=>1,
-                            'operationId'=>$postingOperation,'shiftSessionId'=>$checkoutShiftSessionId,'updatedBy'=>$loggedInStaff['id']??null,
-                            'taxRuleId'=>($settlementTaxRule['matched']??false)?(string)$settlementTaxRule['ruleId']:null,
-                            'taxRuleName'=>($settlementTaxRule['matched']??false)?(string)$settlementTaxRule['ruleName']:null,
-                            'taxSource'=>'live_rule','taxSnapshotStatus'=>'confirmed',
+                            'operationId'=>$postingOperation,'shiftSessionId'=>$postingShiftSessionId,'updatedBy'=>$loggedInStaff['id']??null,
+                            'taxRuleId'=>null,
+                            'taxRuleName'=>null,
+                            'taxSource'=>'booking_component_allocation','taxSnapshotStatus'=>'confirmed',
                             'updatedSource'=>'web','version'=>1,
                             'isSplitPayment'=>!empty($splitSnapshot['isSplitPayment'])?1:0,
                             'splitCashAmount'=>$splitSnapshot['splitCashAmount']??0,
@@ -1789,7 +1797,7 @@ switch ($action) {
                     if ($isSplitPayment) {
                         $splitTransferBankAccountId=trim((string)$splitTransferBankAccountId);
                         if ($splitCashAmount <= 0 || $splitTransferAmount <= 0 || $splitTransferBankAccountId===''
-                            || !moneyMatches($splitCashAmount + $splitTransferAmount, $remainingTotalAmount)) {
+                            || !moneyMatches($splitCashAmount + $splitTransferAmount, $remainingTotalAmount, 0.01)) {
                             http_response_code(422);
                             throw new InvalidArgumentException('Nominal split checkout harus sama dengan sisa tagihan dan akun transfer/QRIS wajib dipilih.');
                         }

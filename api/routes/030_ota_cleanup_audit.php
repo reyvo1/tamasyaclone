@@ -243,13 +243,14 @@ switch ($action) {
             foreach($otaAdjustments as $adj){
                 $disbursementId=(string)($adj['disbursementId']??'');if($disbursementId==='')continue;
                 $sourceTx=(string)($adj['sourceTransactionId']??'');$destTx=(string)($adj['destinationTransactionId']??'');
+                $commissionTx=(string)($adj['commissionTransactionId']??'');
                 $receivableIds=(array)($adj['receivableTransactionIds']??[]);
                 if(($adj['action']??'')==='delete'){
                     // Seluruh disbursement dihapus, maka seluruh allocation row
                     // harus ikut dibersihkan, termasuk baris yang tidak berada
                     // dalam selection tetapi tidak mungkin tersisa secara sah.
                     $pdo->prepare("DELETE FROM ota_disbursement_items WHERE disbursement_id=?")->execute([$disbursementId]);
-                    $pairIds=array_values(array_filter([$sourceTx,$destTx]));
+                    $pairIds=array_values(array_filter([$sourceTx,$destTx,$commissionTx]));
                     if($pairIds){$pph=cleanupPlaceholders($pairIds);if(tamasyaTableExists($pdo,'reconciliation_items'))$pdo->prepare("DELETE FROM reconciliation_items WHERE transaction_id IN ($pph)")->execute($pairIds);if(tamasyaTableExists($pdo,'journal_entries')){$q=$pdo->prepare("SELECT id FROM journal_entries WHERE transaction_id IN ($pph)");$q->execute($pairIds);$jids=$q->fetchAll(PDO::FETCH_COLUMN)?:[];if($jids&&tamasyaTableExists($pdo,'journal_lines')){$jph=cleanupPlaceholders($jids);$pdo->prepare("DELETE FROM journal_lines WHERE journal_entry_id IN ($jph)")->execute($jids);}$pdo->prepare("DELETE FROM journal_entries WHERE transaction_id IN ($pph)")->execute($pairIds);}if(tamasyaTableExists($pdo,'transaction_allocations'))$pdo->prepare("DELETE FROM transaction_allocations WHERE transaction_id IN ($pph)")->execute($pairIds);tamasyaDeleteFinancialTransactions($pdo,$pairIds,$loggedInStaff,'ota_cleanup','ota_cleanup_delete');$otaDeletedTransactionIds=array_merge($otaDeletedTransactionIds,$pairIds);}
                     $pdo->prepare("DELETE FROM ota_disbursements WHERE id=?")->execute([$disbursementId]);
                 }else{
@@ -836,6 +837,15 @@ switch ($action) {
                     ? (trim((string)$transactionPatch['splitTransferBankAccountId']) ?: null)
                     : (trim((string)($oldTx['splitTransferBankAccountId']??'')) ?: null);
                 $targetKind = normalizeTransactionKind((string)($oldTx['transactionKind'] ?? inferTransactionKind($oldTx)));
+                $oldType = strtolower(trim((string)($oldTx['type'] ?? 'income')));
+                // A type correction cannot keep an income-only kind such as
+                // booking_charge/settlement on an expense row (or an expense-only
+                // kind on an income row). The old kind was the source of the
+                // mismatch that made replacement postings fail authority/tax
+                // validation while direct updates persisted an inconsistent row.
+                if ($targetType !== $oldType && $activityPurpose === '') {
+                    $targetKind = $targetType === 'expense' ? 'manual' : 'booking_charge';
+                }
                 if ($activityPurpose === 'extension') {
                     $targetType = 'income';
                     $targetCategory = getRoomRentalCategoryName($pdo);
@@ -900,7 +910,16 @@ switch ($action) {
                 $targetSubcategory=$targetCatalog['subcategoryName'] ?? null;
 
                 $historicalSource=tamasyaTransactionIsHistorical($oldTx);
-                if($historicalSource){
+                if($targetType==='expense'){
+                    // Expense corrections are not taxable sales. Reusing the
+                    // booking/room tax resolver here would copy an income PBJT
+                    // snapshot onto an expense row.
+                    $tax=[
+                        'baseAmount'=>(float)$targetAmount,'taxAmount'=>0.0,'taxRate'=>0.0,
+                        'taxSnapshotStatus'=>'not_applicable','taxSource'=>'not_applicable',
+                        'taxRuleId'=>null,'taxRuleName'=>null
+                    ];
+                }elseif($historicalSource){
                     $taxPayload=array_merge($oldTx,array_intersect_key($transactionPatch,array_flip(['baseAmount','taxAmount','taxRate'])));
                     try{$tax=tamasyaNormalizeHistoricalTaxSnapshot($taxPayload,(float)$targetAmount,true);}
                     catch(Throwable $taxError){$pdo->rollBack();http_response_code(tamasyaExceptionHttpStatus($taxError,422));echo tamasyaJsonEncode(['success'=>false,'error'=>clientExceptionMessage('Normalisasi pajak transaksi historis gagal',$taxError)]);break;}
@@ -1006,6 +1025,28 @@ switch ($action) {
                     ],$loggedInStaff,'audit_correction','audit_correction',['source'=>'audit-correction','lockRows'=>true,'requireAll'=>true]);
                 } else {
                     $correctionMode = 'direct-source-update';
+                    $projectedCorrectionTx=array_merge($oldTx,[
+                        'type'=>$targetType,'category'=>$targetCategory,'subcategory'=>$targetSubcategory,
+                        'categoryId'=>$targetCatalog['categoryId'],'categorySystemKey'=>$targetCatalog['categorySystemKey'],
+                        'subcategoryId'=>$targetCatalog['subcategoryId'],'subcategorySystemKey'=>$targetCatalog['subcategorySystemKey'],
+                        'roomNumber'=>$newRoomNumber,'amount'=>$targetAmount,'date'=>$targetDate,'description'=>$targetDescription,
+                        'bankAccountId'=>$targetBank,'bookingSource'=>$newBookingSource,'baseAmount'=>$tax['baseAmount'],
+                        'taxAmount'=>$tax['taxAmount'],'taxRate'=>$tax['taxRate'],'transactionKind'=>$targetKind,
+                        'taxSnapshotStatus'=>$tax['taxSnapshotStatus']??($oldTx['taxSnapshotStatus']??'confirmed'),
+                        'taxSource'=>$tax['taxSource']??($oldTx['taxSource']??'live_rule'),
+                        'taxRuleId'=>$tax['taxRuleId']??($oldTx['taxRuleId']??null),
+                        'taxRuleName'=>$tax['taxRuleName']??($oldTx['taxRuleName']??null),
+                        'isSplitPayment'=>$targetIsSplit?1:0,'splitCashAmount'=>$targetSplitCash,'splitTransferAmount'=>$targetSplitTransfer,
+                        'splitTransferBankAccountId'=>$targetSplitBank,
+                    ]);
+                    if(empty($historicalSource)){
+                        if(trim((string)($projectedCorrectionTx['shiftSessionId']??''))===''){
+                            $oldCashIncome=strtolower(trim((string)($oldTx['type']??'')))==='income' && tamasyaCanonicalCashLegAmount($oldTx)>0.009;
+                            $projectedCorrectionTx['shiftSessionId']=resolveOpenShiftSessionId($pdo,$loggedInStaff,$oldCashIncome);
+                        }
+                        if($targetType==='expense') tamasyaAssertOpenShiftCashCanCoverExpenseExcluding($pdo,$projectedCorrectionTx,$transactionId);
+                        if(strtolower(trim((string)($oldTx['type']??'')))==='income' || $targetType==='income') tamasyaAssertOpenShiftCashProjection($pdo,$projectedCorrectionTx,$transactionId);
+                    }
                     tamasyaMutateFinancialTransaction($pdo,$transactionId,[
                         'type'=>$targetType,'category'=>$targetCategory,'subcategory'=>$targetSubcategory,
                         'categoryId'=>$targetCatalog['categoryId'],'categorySystemKey'=>$targetCatalog['categorySystemKey'],

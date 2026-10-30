@@ -562,7 +562,7 @@ switch ($action) {
                 echo json_encode(['success'=>false,'error'=>'Slip berstatus dibayar wajib mempunyai gaji bersih lebih dari nol. Simpan sebagai draft bila hanya untuk pengujian komponen.']);
                 break;
             }
-            if (isset($input['netSalary']) && !moneyMatches((float)$input['netSalary'], $netSalary)) {
+            if (isset($input['netSalary']) && !moneyMatches((float)$input['netSalary'], $netSalary, 0.01)) {
                 http_response_code(422);
                 echo json_encode(['success'=>false,'error'=>'Gaji bersih dari browser tidak sesuai perhitungan server.']);
                 break;
@@ -604,11 +604,11 @@ switch ($action) {
                     $paidChanged =
                         (string)($existingSlip['staff_id'] ?? '') !== $staffId ||
                         (string)($existingSlip['period'] ?? '') !== $period ||
-                        !moneyMatches((float)($existingSlip['basic_salary'] ?? 0), $basicSalary) ||
-                        !moneyMatches((float)($existingSlip['allowances'] ?? 0), $allowances) ||
-                        !moneyMatches((float)($existingSlip['deductions'] ?? 0), $deductions) ||
-                        !moneyMatches((float)($existingSlip['bonus'] ?? 0), $bonus) ||
-                        !moneyMatches((float)($existingSlip['net_salary'] ?? 0), $netSalary) ||
+                        !moneyMatches((float)($existingSlip['basic_salary'] ?? 0), $basicSalary, 0.01) ||
+                        !moneyMatches((float)($existingSlip['allowances'] ?? 0), $allowances, 0.01) ||
+                        !moneyMatches((float)($existingSlip['deductions'] ?? 0), $deductions, 0.01) ||
+                        !moneyMatches((float)($existingSlip['bonus'] ?? 0), $bonus, 0.01) ||
+                        !moneyMatches((float)($existingSlip['net_salary'] ?? 0), $netSalary, 0.01) ||
                         trim((string)($existingSlip['notes'] ?? '')) !== $notes ||
                         $existingAllowanceJson !== $detailedAllowances ||
                         $existingDeductionJson !== $detailedDeductions ||

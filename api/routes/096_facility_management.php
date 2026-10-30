@@ -40,7 +40,7 @@ function tamasyaFacilityClock(string $value): string {
     return $value;
 }
 function tamasyaFacilitySlotConflicts(PDO $pdo, string $facilityId, string $useDate, ?string $startTime, ?string $endTime, ?string $excludeId=null): bool {
-    $rows=$pdo->prepare("SELECT start_time,end_time FROM facility_bookings WHERE facility_id=? AND use_date=? AND status IN ('reserved','active')");
+    $rows=$pdo->prepare("SELECT id,start_time,end_time FROM facility_bookings WHERE facility_id=? AND use_date=? AND status IN ('reserved','active')");
     $rows->execute([$facilityId,$useDate]);
     $newStart=$startTime!==null&&$startTime!==''?tamasyaFacilityClock($startTime):'';
     $newEnd=$endTime!==null&&$endTime!==''?tamasyaFacilityClock($endTime):'';
@@ -118,6 +118,7 @@ try {
             foreach(['openTime'=>$openTime,'closeTime'=>$closeTime] as $label=>$value){
                 if($value!==''&&!preg_match('/^([01]\d|2[0-3]):[0-5]\d$/',$value))throw new InvalidArgumentException('Jam operasional tidak valid (HH:MM).');
             }
+            if($openTime!==''&&$closeTime!==''&&$openTime>=$closeTime)throw new InvalidArgumentException('Jam buka harus sebelum jam tutup fasilitas.');
             $pdo->beginTransaction();
             try{
                 $type=$fetchOne($pdo,"SELECT * FROM facility_types WHERE id=? LIMIT 1 FOR UPDATE",[$typeId]);
@@ -170,6 +171,8 @@ try {
                 if(in_array($capacityModel,['slot','room'],true)){
                     if($startTime===''||$endTime==='')throw new InvalidArgumentException('Model kapasitas ini wajib jam mulai dan jam selesai.');
                     if($endTime<=$startTime)throw new InvalidArgumentException('Jam selesai harus setelah jam mulai.');
+                    if(!empty($facility['open_time']) && $startTime < substr((string)$facility['open_time'],0,5)) throw new InvalidArgumentException('Jam mulai sebelum jam buka fasilitas.');
+                    if(!empty($facility['close_time']) && $endTime > substr((string)$facility['close_time'],0,5)) throw new InvalidArgumentException('Jam selesai setelah jam tutup fasilitas.');
                     if(tamasyaFacilitySlotConflicts($pdo,$facilityId,$useDate,$startTime,$endTime))throw new DomainException('Slot fasilitas sudah terisi pada jam tersebut.',409);
                 }
                 if($capacityModel==='quota'){

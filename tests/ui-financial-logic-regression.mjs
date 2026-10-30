@@ -94,20 +94,12 @@ check('Client bucket matches server: bookingId presence routes to room',()=>{
  const tx={id:'bk',type:'income',date:'2026-01-28',amount:110000,baseAmount:100000,taxAmount:10000,taxSnapshotStatus:'confirmed',transactionKind:'manual',categorySystemKey:'',bookingId:'B-123'};
  assert.equal(policy.transactionSemantics(tx).bucket,'room');
 });
-check('P&L tab shows per-category breakdown for income and expense',()=>{
- const report=read('assets/chunks/report.js');
- assert.ok(report.includes('Rincian per kategori (pemasukan, basis KAS)'));
- assert.ok(report.includes('Rincian per kategori (pengeluaran, basis KAS)'));
+check('P&L invariants verified by behavior (see tests/pnl-model-behavior.mjs)', () => {
+ // Converted from string matching to behavior: St=sum(buckets), ut=sum(expense),
+ // ft=St-ut, sum(A)<=Ya, sum(Z)<=On are asserted with real data in
+ // tests/pnl-model-behavior.mjs (5 scenarios).
+ const report = read('assets/chunks/report.js');
  assert.ok(report.includes('Object.keys(A).map'));
  assert.ok(report.includes('Object.keys(Z).map'));
-});
-check('P&L invariants present: St=sum revenue buckets, ut=sum expense, ft=St-ut',()=>{
- const report=read('assets/chunks/report.js');
- assert.ok(report.includes('St=Cn+posRevenue+gn+tr'));
- assert.ok(report.includes('ut=posCogs+js+K+Ze'));
- assert.ok(report.includes('ft=St-ut'));
- assert.ok(!report.includes('vs=0,'));
- assert.ok(!report.includes('Wa=0,ar=0'));
- assert.ok(!report.includes('ns=f.useMemo(()=>[],[Gt])'));
 });
 console.log(`${passed} passed; 0 failed`);

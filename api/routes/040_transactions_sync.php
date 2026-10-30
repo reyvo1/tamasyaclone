@@ -458,6 +458,7 @@ switch ($action) {
                 $taxSnapshotStatus=$taxSnapshot['taxSnapshotStatus'];
                 $taxSource=$taxSnapshot['taxSource'];
                 $taxRuleId=$taxSnapshot['taxRuleId'];
+                $taxRuleName=$taxSnapshot['taxRuleName']??null;
                 $taxNote=$type==='income' ? (trim((string)($input['taxNote']??''))?:null) : null;
                 // Revalidate master/rate under the item row lock, in the existing DB txn.
                 $catalogSnapshot=$catalogIntent!==null ? tamasyaCatalogTransactionIntent($pdo,$catalogIntent,[
@@ -476,7 +477,7 @@ switch ($action) {
                     'subcategory'=>$subcategory,'subcategoryId'=>$subcategoryId,'subcategorySystemKey'=>$subcategorySystemKey,'roomNumber'=>$roomNumber,
                     'date'=>$date,'serviceDate'=>$historicalMetadata['serviceDate'],'description'=>$description,'proofUrl'=>$proofUrl,
                     'createdBy'=>$createdBy,'baseAmount'=>$baseAmount,'taxAmount'=>$taxAmount,'taxRate'=>$taxRate,
-                    'taxSnapshotStatus'=>$taxSnapshotStatus,'taxSource'=>$taxSource,'taxRuleId'=>$taxRuleId,'taxNote'=>$taxNote,'bookingId'=>$bookingId,
+                    'taxSnapshotStatus'=>$taxSnapshotStatus,'taxSource'=>$taxSource,'taxRuleId'=>$taxRuleId,'taxRuleName'=>$taxRuleName,'taxNote'=>$taxNote,'bookingId'=>$bookingId,
                     'bookingSource'=>$bookingSource,'transactionKind'=>$transactionKind,'isSystemGenerated'=>0,
                     'recordOrigin'=>$recordOrigin,'shiftExempt'=>$shiftExempt,'shiftExemptionReason'=>$shiftExemptionReason,
                     'importBatchId'=>$importBatchId,'historicalSourceType'=>$historicalMetadata['historicalSourceType'],
@@ -495,8 +496,13 @@ switch ($action) {
                 // drawer below zero and surface later as an unexplained closing variance.
                 // When no shift is open this stays null and the existing guard below
                 // still rejects the save, so behaviour for the no-shift case is unchanged.
+                $requiresOpenShift=tamasyaManualTransactionRequiresOpenShift([
+                    'type'=>$type,'amount'=>$amount,'bankAccountId'=>$bankAccountId,
+                    'isSplitPayment'=>$isSplitPayment?1:0,
+                    'splitCashAmount'=>$isSplitPayment?$splitCashAmount:0,
+                ]);
                 $liveShiftSessionId=null;
-                if(!$isHistoricalImport){
+                if(!$isHistoricalImport && $requiresOpenShift){
                     $openShiftForCoverage=getOpenShiftForStaff($pdo,(string)($loggedInStaff['id']??''),false);
                     $liveShiftSessionId=$openShiftForCoverage?(string)$openShiftForCoverage['id']:null;
                 }
@@ -514,11 +520,11 @@ switch ($action) {
                     'shiftSessionId'=>$liveShiftSessionId,
                 ]),$loggedInStaff,$postingAuthority,$postingOptions);
                 if ($catalogSnapshot!==null) tamasyaCatalogSaveTransactionSnapshot($pdo,$txId,$operationId,$catalogSnapshot);
-                if(!$isHistoricalImport && !getOpenShiftForStaff($pdo,(string)($loggedInStaff['id']??''),false)){
-                    throw new RuntimeException('Transaksi masih berstatus operasional live dan wajib memiliki shift aktif. Untuk melengkapi arsip lama atau data satu tahun, pilih Mode Data Historis / Backfill agar transaksi disimpan sebagai historical_import dan tidak masuk shift berjalan.');
+                if(!$isHistoricalImport && $requiresOpenShift && !getOpenShiftForStaff($pdo,(string)($loggedInStaff['id']??''),false)){
+                    throw new RuntimeException('Transaksi tunai masih berstatus operasional live dan wajib memiliki shift aktif. Pilih akun transfer/QRIS untuk transaksi non-tunai, atau buka shift kas. Untuk arsip lama, pilih Mode Data Historis / Backfill.');
                 }
                 if(!$isHistoricalImport){
-                    attachTransactionToActorShift($pdo,$txId,$loggedInStaff);
+                    attachTransactionToActorShift($pdo,$txId,$loggedInStaff,$requiresOpenShift);
                 }
                 if($bookingId && !$isHistoricalImport){
                     $allocationLedgerNet=(float)($ledgerBefore['net']??0);
@@ -834,6 +840,7 @@ switch ($action) {
                 foreach(['baseAmount','taxAmount','taxRate','taxSnapshotStatus','taxSource','taxRuleId'] as $taxField){
                     $input[$taxField]=$resolvedTaxSnapshot[$taxField]??null;
                 }
+                $input['taxRuleName']=$resolvedTaxSnapshot['taxRuleName']??($taxContext['taxRuleName']??null);
                 if($finalType==='expense')$input['taxNote']=null; elseif(array_key_exists('taxNote',$taxContext))$input['taxNote']=trim((string)$taxContext['taxNote'])?:null;
                 $finalTransactionKind=normalizeTransactionKind((string)($input['transactionKind']??($oldTx['transactionKind']??'manual')));
                 $financialImpactChanged=(
@@ -893,6 +900,7 @@ switch ($action) {
                     'taxSnapshotStatus'=>fn($v)=>trim((string)$v)?:'unresolved',
                     'taxSource'=>fn($v)=>$v===''||$v===null?null:trim((string)$v),
                     'taxRuleId'=>fn($v)=>$v===''||$v===null?null:trim((string)$v),
+                    'taxRuleName'=>fn($v)=>$v===''||$v===null?null:trim((string)$v),
                     'taxNote'=>fn($v)=>$v===''||$v===null?null:trim((string)$v),
                     'transactionKind'=>fn($v)=>normalizeTransactionKind((string)$v),
                     'serviceDate'=>fn($v)=>$v===''||$v===null?null:(string)$v,
@@ -933,11 +941,15 @@ switch ($action) {
                 // is evaluated here.
                 $editCoverageTx=array_merge($oldTx,$mutationChanges);
                 if(!$isHistoricalTx){
+                    $editOldType=strtolower(trim((string)($oldTx['type']??'')));
+                    $editNewType=strtolower(trim((string)($editCoverageTx['type']??'')));
                     if(trim((string)($editCoverageTx['shiftSessionId']??''))===''){
-                        $openShiftForEditCoverage=getOpenShiftForStaff($pdo,(string)($loggedInStaff['id']??''),false);
-                        $editCoverageTx['shiftSessionId']=$openShiftForEditCoverage?(string)$openShiftForEditCoverage['id']:null;
+                        $editTargetCashLeg=tamasyaCanonicalCashLegAmount($editCoverageTx);
+                        $editRequiresShift=$editTargetCashLeg>0.009;
+                        $editCoverageTx['shiftSessionId']=resolveOpenShiftSessionId($pdo,$loggedInStaff,$editRequiresShift);
                     }
-                    tamasyaAssertOpenShiftCashCanCoverExpense($pdo,$editCoverageTx);
+                    if($editNewType==='expense') tamasyaAssertOpenShiftCashCanCoverExpenseExcluding($pdo,$editCoverageTx,$id);
+                    if($editOldType==='income' || $editNewType==='income') tamasyaAssertOpenShiftCashProjection($pdo,$editCoverageTx,$id);
                 }
                 tamasyaMutateFinancialTransaction(
                     $pdo,$id,$mutationChanges,$loggedInStaff,'finance_correction','manual_edit',
@@ -1234,8 +1246,20 @@ switch ($action) {
         try {
             $stmt = $pdo->prepare("SELECT proofUrl FROM transactions WHERE id = ?");
             $stmt->execute([$id]);
+            if ($stmt->rowCount() === 0) {
+                http_response_code(404);
+                echo json_encode(["success" => false, "message" => "Transaksi tidak ditemukan."]);
+                break;
+            }
             $proofUrl = $stmt->fetchColumn() ?: null;
-            echo json_encode(["success" => true, "proofUrl" => $proofUrl]);
+            $resolvedProofUrl = $proofUrl;
+            $proofError = null;
+            if (is_string($proofUrl) && str_starts_with($proofUrl, 'telegram_file_id:')) {
+                $fileId = trim(substr($proofUrl, strlen('telegram_file_id:')));
+                $resolvedProofUrl = tamasyaTelegramFileDataUrl($pdo, $fileId);
+                if ($resolvedProofUrl === null) $proofError = 'Foto Telegram belum dapat diambil ulang.';
+            }
+            echo json_encode(["success" => true, "proofUrl" => $resolvedProofUrl, "proofError" => $proofError]);
         } catch (Exception $e) {
             tamasyaApplyExceptionHttpStatus($e, 500);
             echo json_encode(["success" => false, "message" => clientExceptionMessage("Gagal mengambil foto bukti", $e)]);
@@ -2424,7 +2448,7 @@ switch ($action) {
                 $syncEntity('transactions','id',$item,[
                     'id','type','category','subcategory','roomNumber','amount','date','description','proofUrl','bankAccountId',
                     'isSplitPayment','splitCashAmount','splitTransferAmount','splitTransferBankAccountId',
-                    'bookingSource','documentNumber','baseAmount','taxAmount','taxRate','taxSnapshotStatus','taxSource','taxRuleId','taxNote',
+                    'bookingSource','documentNumber','baseAmount','taxAmount','taxRate','taxSnapshotStatus','taxSource','taxRuleId','taxRuleName','taxNote',
                     'transactionKind','sourceEntity','sourceEntityId','operationId','recordOrigin',
                     'shiftExempt','shiftExemptionReason','importBatchId','createdAt','serviceDate','historicalSourceType',
                     'historicalSourceReference','sourceReportedBy','reportingPeriod','periodStatusAtEntry','periodImpactStatus',

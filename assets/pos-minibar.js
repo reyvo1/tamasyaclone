@@ -632,7 +632,7 @@ window.TamasyaCurrencyDisplay=window.TamasyaCurrencyDisplay||{formatNumber:funct
     const method = $('payment-method').value; const op = operationId('pos-sale');
     const body = {
       operationId: op, paymentMethod: method, bankAccountId: $('bank-account').value || null, bookingId: $('booking-select').value || null,
-      discountType: $('discount-type').value, discountValue: Number($('discount-value').value || 0), discountReason: $('discount-reason').value,
+      discountType: $('discount-type').value, discountValue: Number($('discount-value').value || 0), discountReason: $('discount-reason').value, promoCode: $('promo-code')?.value?.trim() || null,
       notes: $('sale-notes').value, deliveryNote: method === 'room_charge' ? $('sale-notes').value : null, items: [...state.cart.entries()].map(([productId, quantity]) => ({ productId, quantity }))
     };
     if (method === 'room_charge' && !body.bookingId) return toast('Pilih kamar/tamu aktif.', true);

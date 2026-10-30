@@ -1080,10 +1080,13 @@ function createTelegramCashTransaction($pdo, $operationId, $loggedInStaff, array
         $transaction['taxSnapshotStatus']=$serverTax['taxSnapshotStatus'];
         $transaction['taxSource']=$serverTax['taxSource'];
         $transaction['taxRuleId']=$serverTax['taxRuleId'];
+        $requiresOpenShift=tamasyaManualTransactionRequiresOpenShift($transaction);
+        $shiftSessionId=resolveOpenShiftSessionId($pdo,$loggedInStaff,$requiresOpenShift);
+        $transaction['shiftSessionId']=$shiftSessionId;
         tamasyaPostFinancialTransaction($pdo,$transaction,$loggedInStaff,'finance_manual',[
             'requireCatalog'=>true,'lockCatalog'=>true,'source'=>'telegram'
         ]);
-        attachTransactionToActorShift($pdo,(string)$transaction['id'],$loggedInStaff);
+        attachTransactionToActorShift($pdo,(string)$transaction['id'],$loggedInStaff,$requiresOpenShift);
 
         $notificationId = 'n_tg_' . $stableSuffix;
         $stmtNotif = $pdo->prepare("INSERT INTO notifications (id,message,timestamp,`read`,type) VALUES (?,?,?,0,'finance')");
@@ -2035,17 +2038,17 @@ function finalizeTelegramCheckout(PDO $pdo, array $staff, string $roomNumber, st
             $label = $splitActive ? ('Split Tunai + '.strtoupper((string)$splitTransferMethod)) : ($method === 'qris' ? 'QRIS' : ($method === 'transfer' ? 'Transfer' : ($method === 'ota' ? 'Piutang OTA' : 'Tunai')));
             $desc = "Pelunasan Kamar {$roomNumber} - " . (string)$booking['guestName'] . " ({$label}, Telegram)";
             // Telegram checkout settlement is also live booking income, so it needs the
-            // same tax snapshot contract as the web checkout. Without it this row fails
-            // tamasyaAssertLiveTaxSnapshotIntegrity() and blocks later postings.
-            $settlementTaxRule=resolveConfiguredTaxRule($pdo,$bookingSource,'settlement',date('Y-m-d'));
+            // same tax snapshot contract as the web checkout. The settlement amount is
+            // an allocation of the booking's aggregate PBJT snapshot; the attach below
+            // fills the final component rule evidence.
             tamasyaPostFinancialTransaction($pdo,[
                 'id'=>$txId,'type'=>'income','category'=>$roomCategoryName,'categorySystemKey'=>'room_rental','subcategory'=>(string)$booking['roomType'],
                 'roomNumber'=>$roomNumber,'amount'=>$remaining,'date'=>date('Y-m-d'),'description'=>$desc,'createdBy'=>currentStaffLabel($staff),
                 'bankAccountId'=>$bankAccountId,'bookingId'=>(string)$booking['id'],'bookingSource'=>$bookingSource,'baseAmount'=>$remainingBase,
                 'taxAmount'=>$remainingTax,'taxRate'=>$serverTax['taxRate'],
-                'taxRuleId'=>($settlementTaxRule['matched']??false)?(string)$settlementTaxRule['ruleId']:null,
-                'taxRuleName'=>($settlementTaxRule['matched']??false)?(string)$settlementTaxRule['ruleName']:null,
-                'taxSource'=>'live_rule','taxSnapshotStatus'=>'confirmed','transactionKind'=>'settlement','sourceEntity'=>'booking','sourceEntityId'=>(string)$booking['id'],
+                'taxRuleId'=>null,
+                'taxRuleName'=>null,
+                'taxSource'=>'booking_component_allocation','taxSnapshotStatus'=>'confirmed','transactionKind'=>'settlement','sourceEntity'=>'booking','sourceEntityId'=>(string)$booking['id'],
                 'isSystemGenerated'=>1,'operationId'=>$operationId,'shiftSessionId'=>$checkoutShiftSessionId,'updatedBy'=>(string)$staff['id'],
                 'updatedSource'=>'telegram','version'=>1,
                 'isSplitPayment'=>$splitActive?1:0,'splitCashAmount'=>$splitActive?$splitCashAmount:0,'splitTransferAmount'=>$splitActive?$splitTransferAmount:0,
@@ -2218,7 +2221,7 @@ function tamasyaResolveBookingAllocationTaxSnapshot(
         $rule=resolveConfiguredTaxRule($pdo,$bookingSource,$taxKind,$date);
         if(empty($rule['matched']))throw new RuntimeException('Alokasi transaksi live ditolak karena tidak ada Aturan Pajak aktif untuk sumber '.$bookingSource.', jenis '.$taxKind.', tanggal '.$date.'. Rule 0%/tidak kena pajak harus dibuat eksplisit.');
         $breakdown=calculateInclusiveTaxBreakdown($amount,(float)$rule['rate']);
-        return $breakdown+['taxSnapshotStatus'=>'confirmed','taxSource'=>'live_rule','taxRuleId'=>$rule['ruleId']??null];
+        return $breakdown+['taxSnapshotStatus'=>'confirmed','taxSource'=>'live_rule','taxRuleId'=>$rule['ruleId']??null,'taxRuleName'=>$rule['ruleName']??null];
     }
 
     $snapshotStatus=strtolower(trim((string)($transaction['taxSnapshotStatus']??'')));
@@ -2226,7 +2229,7 @@ function tamasyaResolveBookingAllocationTaxSnapshot(
     $sourceKind=tamasyaInferTransactionTaxKind($transaction);
     $explicitUnknown=$snapshotStatus==='unresolved'||$snapshotSource==='unresolved';
     if($explicitUnknown){
-        if($reportingOnly)return ['baseAmount'=>$amount,'taxAmount'=>0.0,'taxRate'=>0.0,'taxSnapshotStatus'=>'unresolved','taxSource'=>'unresolved','taxRuleId'=>null];
+        if($reportingOnly)return ['baseAmount'=>$amount,'taxAmount'=>0.0,'taxRate'=>0.0,'taxSnapshotStatus'=>'unresolved','taxSource'=>'unresolved','taxRuleId'=>null,'taxRuleName'=>null];
         throw new RuntimeException('PBJT transaksi historis sumber masih belum diketahui. Selesaikan snapshot pajak transaksi terlebih dahulu sebelum mengalokasikannya ke booking.');
     }
 
@@ -2238,7 +2241,7 @@ function tamasyaResolveBookingAllocationTaxSnapshot(
         $base=round((float)$sourceTax['baseAmount']*($amount/$sourceAmount),2);
         $tax=round(max(0.0,$amount-$base),2);
         return ['baseAmount'=>$base,'taxAmount'=>$tax,'taxRate'=>(float)$sourceTax['taxRate'],
-            'taxSnapshotStatus'=>'confirmed','taxSource'=>'historical_document','taxRuleId'=>null];
+            'taxSnapshotStatus'=>'confirmed','taxSource'=>'historical_document','taxRuleId'=>null,'taxRuleName'=>null];
     }
 
     // Canonical historical allocation is rule-first BY TARGET COMPONENT.
@@ -2247,7 +2250,7 @@ function tamasyaResolveBookingAllocationTaxSnapshot(
     $rule=resolveConfiguredTaxRule($pdo,$bookingSource,$taxKind,$date);
     if(!empty($rule['matched'])){
         $breakdown=calculateInclusiveTaxBreakdown($amount,(float)$rule['rate']);
-        return $breakdown+['taxSnapshotStatus'=>'confirmed','taxSource'=>'historical_allocation_rule','taxRuleId'=>$rule['ruleId']??null];
+        return $breakdown+['taxSnapshotStatus'=>'confirmed','taxSource'=>'historical_allocation_rule','taxRuleId'=>$rule['ruleId']??null,'taxRuleName'=>$rule['ruleName']??null];
     }
 
     // If the exact same component was snapshotted previously, preserving that
@@ -2260,11 +2263,11 @@ function tamasyaResolveBookingAllocationTaxSnapshot(
             $base=round((float)$sourceTax['baseAmount']*($amount/$sourceAmount),2);
             $tax=round(max(0.0,$amount-$base),2);
             return ['baseAmount'=>$base,'taxAmount'=>$tax,'taxRate'=>(float)$sourceTax['taxRate'],
-                'taxSnapshotStatus'=>'confirmed','taxSource'=>$snapshotSource?:'historical_snapshot','taxRuleId'=>trim((string)($transaction['taxRuleId']??''))?:null];
+                'taxSnapshotStatus'=>'confirmed','taxSource'=>$snapshotSource?:'historical_snapshot','taxRuleId'=>trim((string)($transaction['taxRuleId']??''))?:null,'taxRuleName'=>trim((string)($transaction['taxRuleName']??''))?:null];
         }catch(Throwable $ignored){}
     }
 
-    if($reportingOnly)return ['baseAmount'=>$amount,'taxAmount'=>0.0,'taxRate'=>0.0,'taxSnapshotStatus'=>'unresolved','taxSource'=>'unresolved','taxRuleId'=>null];
+    if($reportingOnly)return ['baseAmount'=>$amount,'taxAmount'=>0.0,'taxRate'=>0.0,'taxSnapshotStatus'=>'unresolved','taxSource'=>'unresolved','taxRuleId'=>null,'taxRuleName'=>null];
     throw new RuntimeException('Alokasi historical_import sebagai '.$taxKind.' tidak mempunyai Aturan Pajak pada '.$date.' dan snapshot transaksi induk tidak dapat dipakai untuk jenis komponen yang berbeda. Buat rule historis eksplisit (termasuk 0%/tidak kena pajak) atau koreksi klasifikasi transaksi sumber.');
 }
 
@@ -2305,7 +2308,8 @@ function tamasyaReconcileTransactionTaxFromAllocations(PDO $pdo,string $transact
         tamasyaMutateFinancialTransaction($pdo,$transactionId,[
             'baseAmount'=>$restore['baseAmount'],'taxAmount'=>$restore['taxAmount'],'taxRate'=>$restore['taxRate'],
             'taxSnapshotStatus'=>$restore['taxSnapshotStatus'],'taxSource'=>$restore['taxSource'],'taxRuleId'=>$restore['taxRuleId']??null,
-        ],$actor,'tax_projection','tax_snapshot',['source'=>$source,'lockRows'=>true,'requireAll'=>true]);
+            'taxRuleName'=>$restore['taxRuleName']??tamasyaTaxRuleNameById($pdo,$restore['taxRuleId']??null),
+        ],$actor,'tax_projection','tax_snapshot',['source'=>$source,'lockRows'=>true,'requireAll'=>true,'requireUnlocked'=>true]);
         $txStmt->execute([$transactionId]);$after=$txStmt->fetch(PDO::FETCH_ASSOC)?:$before;
         return ['before'=>$before,'after'=>$after,'changed'=>true,'allocated'=>0.0];
     }
@@ -2346,7 +2350,8 @@ function tamasyaReconcileTransactionTaxFromAllocations(PDO $pdo,string $transact
                 // residual is explicitly unknown. Do not publish a guessed total.
                 tamasyaMutateFinancialTransaction($pdo,$transactionId,[
                     'baseAmount'=>null,'taxAmount'=>null,'taxRate'=>null,'taxSnapshotStatus'=>'unresolved','taxSource'=>'unresolved','taxRuleId'=>null,
-                ],$actor,'tax_projection','tax_snapshot',['source'=>$source,'lockRows'=>true,'requireAll'=>true]);
+                    'taxRuleName'=>null,
+                ],$actor,'tax_projection','tax_snapshot',['source'=>$source,'lockRows'=>true,'requireAll'=>true,'requireUnlocked'=>true]);
                 $txStmt->execute([$transactionId]);$after=$txStmt->fetch(PDO::FETCH_ASSOC)?:$before;
                 return ['before'=>$before,'after'=>$after,'changed'=>true,'allocated'=>$allocated,'remaining'=>$remaining,'unresolvedResidual'=>true];
             }else{
@@ -2368,7 +2373,8 @@ function tamasyaReconcileTransactionTaxFromAllocations(PDO $pdo,string $transact
     tamasyaMutateFinancialTransaction($pdo,$transactionId,[
         'baseAmount'=>$baseTotal,'taxAmount'=>$taxTotal,'taxRate'=>$rate,
         'taxSnapshotStatus'=>'confirmed','taxSource'=>'booking_component_allocation','taxRuleId'=>$ruleId,
-    ],$actor,'tax_projection','tax_snapshot',['source'=>$source,'lockRows'=>true,'requireAll'=>true]);
+        'taxRuleName'=>$ruleId!==null?tamasyaTaxRuleNameById($pdo,$ruleId):null,
+    ],$actor,'tax_projection','tax_snapshot',['source'=>$source,'lockRows'=>true,'requireAll'=>true,'requireUnlocked'=>true]);
     $txStmt->execute([$transactionId]);$after=$txStmt->fetch(PDO::FETCH_ASSOC)?:$before;
     $changed=!moneyMatches((float)($before['baseAmount']??0),(float)($after['baseAmount']??0),0.01)
         || !moneyMatches((float)($before['taxAmount']??0),(float)($after['taxAmount']??0),0.01)
@@ -2823,7 +2829,7 @@ function processManualBookingAction($pdo, $loggedInStaff, $input, $updatedSource
                 return ['status'=>'error','http'=>409,'error'=>'Alokasi transaksi live ditolak karena tidak ada Aturan Pajak aktif untuk sumber '.$bookingSource.', jenis '.$taxKind.', tanggal '.$date.'. Rule 0%/tidak kena pajak harus dibuat eksplisit.'];
             }
             $breakdown=calculateInclusiveTaxBreakdown($amount,(float)$rule['rate']);
-            $tax=$breakdown+['taxSnapshotStatus'=>'confirmed','taxSource'=>'live_rule','taxRuleId'=>$rule['ruleId']??null];
+            $tax=$breakdown+['taxSnapshotStatus'=>'confirmed','taxSource'=>'live_rule','taxRuleId'=>$rule['ruleId']??null,'taxRuleName'=>$rule['ruleName']??null];
         }
     }
     $allocationId=generateServerId('alloc');

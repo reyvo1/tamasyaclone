@@ -93,6 +93,35 @@ function ensureTelegramWebhookColumns($pdo) {
     }
 }
 
+function tamasyaTelegramFileDataUrl(PDO $pdo, string $fileId, int $timeout = 6): ?string {
+    $fileId = trim($fileId);
+    if ($fileId === '' || !preg_match('/^[A-Za-z0-9_-]{8,512}$/', $fileId)) return null;
+    $timeout = max(2, min(10, $timeout));
+    try {
+        $conf = $pdo->query("SELECT telegram_bot_token FROM config WHERE id='system_default' LIMIT 1")->fetch() ?: [];
+        $token = trim(decryptStoredSecret($conf['telegram_bot_token'] ?? ''));
+        if ($token === '') return null;
+        $info = telegramApiCall($token, 'getFile', ['file_id'=>$fileId], $timeout);
+        $filePath = (string)($info['data']['result']['file_path'] ?? '');
+        if (empty($info['ok']) || $filePath === '' || str_contains($filePath, '..')) return null;
+        $url = getTelegramApiBaseUrl() . '/file/bot' . $token . '/' . ltrim($filePath, '/');
+        $context = stream_context_create(['http'=>['timeout'=>$timeout,'follow_location'=>0], 'ssl'=>['verify_peer'=>true,'verify_peer_name'=>true]]);
+        $bytes = @file_get_contents($url, false, $context, 0, 8 * 1024 * 1024 + 1);
+        if ($bytes === false || $bytes === '' || strlen($bytes) > 8 * 1024 * 1024) return null;
+        $mime = 'image/jpeg';
+        if (function_exists('finfo_open')) {
+            $fi = finfo_open(FILEINFO_MIME_TYPE);
+            $detected = $fi ? finfo_buffer($fi, $bytes) : false;
+            if ($fi) unset($fi);
+            if (is_string($detected) && in_array($detected, ['image/jpeg','image/png','image/webp'], true)) $mime = $detected;
+        }
+        return 'data:' . $mime . ';base64,' . base64_encode($bytes);
+    } catch (Throwable $e) {
+        error_log('[Telegram Proof] Gagal mengambil file: '.$e->getMessage());
+        return null;
+    }
+}
+
 /** Source line 4194: getTelegramApiBaseUrl */
 function getTelegramApiBaseUrl() {
     $base = trim((string)(getenv('TELEGRAM_API_BASE_URL') ?: 'https://api.telegram.org'));
@@ -706,12 +735,12 @@ function tamasyaTelegramBroadcastTargets($pdo, $message, $isFinancial = false, $
     $messageType=tamasyaTelegramMessageType((string)$message,(bool)$isFinancial,(string)$messageTypeOverride);
     $isFn = $messageType==='finance' || (bool)preg_match('/transaksi|pemasukan|pengeluaran|gaji|nominal|harga|biaya|bayar|pembayaran|saldo|kas|tagihan|refund|transfer|qris|tunai|\brp\b/i', (string)$message);
     $defaultTelegramRoles = [
-        'bookings'=>['admin','manager','receptionist'],
-        'finance'=>['admin','manager','finance'],
-        'inventory'=>['admin','manager','receptionist','koki','cleaning_service'],
-        'operations'=>['admin','manager','receptionist','cleaning_service','keamanan'],
-        'hr'=>['admin','manager'],
-        'system'=>['admin','manager'],
+        'bookings'=>['admin','manager','receptionist','owner'],
+        'finance'=>['admin','manager','finance','owner'],
+        'inventory'=>['admin','manager','receptionist','koki','cleaning_service','owner'],
+        'operations'=>['admin','manager','receptionist','cleaning_service','keamanan','owner'],
+        'hr'=>['admin','manager','owner'],
+        'system'=>['admin','manager','owner'],
     ];
     $targets=[];
     foreach ($chatIds as $chatId) {
@@ -724,7 +753,7 @@ function tamasyaTelegramBroadcastTargets($pdo, $message, $isFinancial = false, $
             $staff = $chatIdToStaff[$trimmedChatId];
             $staffId=trim((string)($staff['staff_id']??'')) ?: null;
             $role = strtolower(trim((string)($staff['role']??'')));
-            $defaultAllowed = in_array($role, $defaultTelegramRoles[$messageType] ?? ['admin','manager'], true);
+            $defaultAllowed = in_array($role, $defaultTelegramRoles[$messageType] ?? ['admin','manager'], true) || $role === 'owner';
             // Preset jabatan + override akun adalah sumber izin efektif. Jangan
             // hanya membaca staff.permissions mentah, karena perubahan preset
             // tidak akan pernah sampai ke penerima notifikasi.
@@ -738,6 +767,7 @@ function tamasyaTelegramBroadcastTargets($pdo, $message, $isFinancial = false, $
             $notificationOverride = function_exists('tamasyaPermissionOverride')
                 ? tamasyaPermissionOverride($permissionSource, 'telegramNotifications', $messageType)
                 : false;
+            if ($role === 'owner') $notificationOverride = null;
             if ($notificationOverride !== null) {
                 if ($notificationOverride !== true) continue;
             } elseif (!$defaultAllowed) {

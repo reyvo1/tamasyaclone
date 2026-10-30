@@ -116,8 +116,8 @@ function tamasyaReceiveGuestSecurityDepositInTransaction(PDO $pdo,array $actor,s
     }
     $remaining=max(0.0,round((float)$summary['requiredAmount']-(float)$summary['heldBalance'],2));
     if($amount>$remaining+0.01)throw new RuntimeException('Penerimaan deposito melebihi saldo deposito yang masih wajib ditahan Rp '.number_format($remaining,0,',','.').'.');
-    $settings=$pdo->query("SELECT require_open_shift_for_sale FROM hotel_operational_settings WHERE id='system_default' LIMIT 1")->fetchColumn();
-    $shiftSessionId=$resolvedShiftSessionId?:resolveOpenShiftSessionId($pdo,$actor,(int)$settings===1);
+    $depositRequiresShift=tamasyaManualTransactionRequiresOpenShift(['type'=>'income','amount'=>$amount,'bankAccountId'=>$account]);
+    $shiftSessionId=$resolvedShiftSessionId?:resolveOpenShiftSessionId($pdo,$actor,$depositRequiresShift);
     $txId='tx_gsd_in_'.substr(hash('sha256',$operationId),0,28);$label=$method==='qris'?'QRIS':($method==='transfer'?'Transfer':'Tunai');
     $description='Deposito Jaminan Kamar '.(string)$booking['roomNumber'].' - '.(string)$booking['guestName'].' ('.$label.')'.($notes!==''?' - '.$notes:'');
     tamasyaPostFinancialTransaction($pdo,[
@@ -160,7 +160,7 @@ function tamasyaSettleGuestSecurityDepositInTransaction(PDO $pdo,array $actor,st
     $operationId=trim((string)($payload['operationId']??''));if($operationId===''||strlen($operationId)>90)throw new InvalidArgumentException('Operation ID penyelesaian deposito wajib dan maksimal 90 karakter.');
     $transactionIds=[];$refundMethod=strtolower(trim((string)($payload['refundMethod']??'cash')));$refundBank=trim((string)($payload['refundBankAccountId']??''));
     if($refundAmount>0){
-        $account=tamasyaSecurityDepositPaymentAccount($pdo,$refundMethod,$refundBank);$settings=$pdo->query("SELECT require_open_shift_for_sale FROM hotel_operational_settings WHERE id='system_default' LIMIT 1")->fetchColumn();$shift=resolveOpenShiftSessionId($pdo,$actor,(int)$settings===1);
+        $account=tamasyaSecurityDepositPaymentAccount($pdo,$refundMethod,$refundBank);$refundRequiresShift=tamasyaManualTransactionRequiresOpenShift(['type'=>'expense','amount'=>$refundAmount,'bankAccountId'=>$account]);$shift=resolveOpenShiftSessionId($pdo,$actor,$refundRequiresShift);
         $op=$operationId.':refund';$dup=$pdo->prepare("SELECT id,amount,transactionKind,sourceEntityId FROM transactions WHERE operationId=? LIMIT 1 FOR UPDATE");$dup->execute([$op]);$old=$dup->fetch(PDO::FETCH_ASSOC);
         if($old){if((string)$old['transactionKind']!=='security_deposit_refund'||(string)($old['sourceEntityId']??'')!==(string)$summary['id']||!moneyMatches((float)$old['amount'],$refundAmount,0.01))throw new RuntimeException('Operation ID refund deposito sudah dipakai untuk transaksi atau booking berbeda.');$txId=(string)$old['id'];}
         else{

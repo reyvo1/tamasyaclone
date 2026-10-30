@@ -349,7 +349,7 @@ function tamasyaEnterpriseSupplierInvoiceThreeWayMatch(PDO $pdo,string $invoiceI
                 if(!$pi){$lr['matched']=false;$lr['issues'][]='PO item tidak ditemukan pada PO invoice.';}
                 else{
                     $iq=round((float)$line['quantity'],3);$pq=round((float)$pi['quantity'],3);if($iq>$pq+0.001){$lr['matched']=false;$lr['issues'][]='Qty invoice melebihi qty PO.';}
-                    $ip=round((float)$line['unit_price'],2);$pp=round((float)$pi['unit_price'],2);$tol=max(0.01,abs($pp)*0.01);if(abs($ip-$pp)>$tol){$lr['matched']=false;$lr['issues'][]='Harga unit invoice berbeda >1% dari PO.';}
+                    $ip=round((float)$line['unit_price'],2);$pp=round((float)$pi['unit_price'],2);$tol=0.01;if(abs($ip-$pp)>$tol){$lr['matched']=false;$lr['issues'][]='Harga unit invoice berbeda dari PO (toleransi Rp0,01).';}
                     if(!empty($inv['grn_id'])){
                         $gi=tamasyaEnterpriseFetch($pdo,"SELECT quantity_received FROM growth_goods_receipt_items WHERE grn_id=? AND po_item_id=?",[$inv['grn_id'],$line['po_item_id']]);
                         if(!$gi){$lr['matched']=false;$lr['issues'][]='PO item belum ada pada GRN yang dipilih.';}

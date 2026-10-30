@@ -212,7 +212,8 @@ try {
             tamasyaFinancialCommit($pdo);$posJson(['success'=>true,'duplicate'=>true,'sale'=>tamasyaPosVisibleSaleRow(tamasyaPosSaleRow($existing),$posCanViewCost)]);return;
         }
         $bankAccountId=tamasyaPosPaymentBank($pdo,$paymentMethod,$input['bankAccountId'] ?? null);
-        if($paymentMethod!=='room_charge') tamasyaPosRequireOpenShift($pdo,$loggedInStaff);
+        $posSaleShift=$paymentMethod==='room_charge'?null:tamasyaPosRequireOpenShift($pdo,$loggedInStaff,$paymentMethod==='cash');
+        $posSaleShiftSessionId=$posSaleShift?(string)$posSaleShift['id']:null;
         $booking=null;$bookingId=null;$bookingExtraId=null;$roomNumber=null;$guestName=null;
         if($paymentMethod==='room_charge'){
             $bookingId=trim((string)($input['bookingId'] ?? ''));
@@ -231,7 +232,7 @@ try {
             $q=$pdo->prepare("SELECT p.*,c.name category_name FROM pos_products p LEFT JOIN pos_categories c ON c.id=p.category_id WHERE p.id=? LIMIT 1 FOR UPDATE");$q->execute([$productId]);$p=$q->fetch(PDO::FETCH_ASSOC);
             if(!$p || !(int)$p['is_active']) throw new RuntimeException('Produk tidak aktif atau tidak ditemukan: '.$productId);
             $available=(float)$p['stock_quantity'];
-            if($qty>$available+0.0001) throw new DomainException('Stok '.$p['name'].' tidak cukup. Tersedia '.$available.' '.$p['unit'].'.');
+            if($qty>$available+0.000001) throw new DomainException('Stok '.$p['name'].' tidak cukup. Tersedia '.$available.' '.$p['unit'].'.');
             $lineOriginalGross=round((float)$p['sale_price']*$qty,2);
             if($lineOriginalGross<=0) throw new RuntimeException('Harga jual '.$p['name'].' belum diisi.');
             $rule=resolveConfiguredTaxRule($pdo,'POS',(string)$p['tax_kind'],$saleDate);
@@ -241,6 +242,28 @@ try {
             $lines[]=['product'=>$p,'qty'=>$qty,'originalGross'=>$lineOriginalGross,'discount'=>0.0,'gross'=>$lineOriginalGross,'base'=>0.0,'tax'=>0.0,'rate'=>$rate,'rule'=>$rule,'cost'=>$lineCost];
             $subtotal=round($subtotal+$lineOriginalGross,2);$cost=round($cost+$lineCost,2);$itemCount++;
             if(!empty($rule['ruleId']))$ruleIds[(string)$rule['ruleId']]=true;
+        }
+        $promoCodeId = null;
+        $promoCodeInput = trim((string)($input['promoCode'] ?? ''));
+        $manualDiscountProvided = !empty($input['discountAmount']) || !empty($input['discount'])
+            || !empty($input['manualDiscount']) || (isset($input['discountValue']) && (float)$input['discountValue'] > 0)
+            || (isset($input['discountType']) && strtolower(trim((string)$input['discountType'])) !== '' && strtolower(trim((string)$input['discountType'])) !== 'none')
+            || !empty($input['discountReason']);
+        if ($promoCodeInput === '' && !$manualDiscountProvided) {
+            $autoPromo = tamasyaPromotionCodeAutoApply($pdo, 'pos', $subtotal, $saleDate);
+            if (is_array($autoPromo) && !empty($autoPromo)) {
+                $promoCodeInput = trim((string)($autoPromo['code'] ?? $autoPromo['promotionCode']['code'] ?? ''));
+            }
+        }
+        if ($promoCodeInput !== '') {
+            if (!tamasyaPromotionCodesEnabled() || !tamasyaPromotionCodesSchemaReady($pdo)) {
+                throw new RuntimeException('Fitur kode promo dinonaktifkan atau schema belum siap.');
+            }
+            $promoResult = tamasyaPromotionCodeValidate($pdo, $promoCodeInput, 'pos', $subtotal);
+            $input['discountType'] = $promoResult['discountType'] === 'percent' ? 'percentage' : 'fixed';
+            $input['discountValue'] = $promoResult['discountValue'];
+            $input['discountReason'] = 'Kode promo ' . $promoResult['promotionCode']['code'];
+            $promoCodeId = (string)$promoResult['promotionCode']['id'];
         }
         $discount=tamasyaPosDiscountPlan(
             $subtotal,
@@ -320,9 +343,10 @@ try {
                 'taxNote'=>'Snapshot per item POS; aturan pajak dipilih dari menu Pajak sesuai tax_kind produk.',
                 'description'=>'Penjualan POS '.$receipt.($discount['amount']>0?' (diskon Rp '.number_format($discount['amount'],0,',','.').')':'').' - '.implode(', ',$summary),'bankAccountId'=>$bankAccountId,
                 'bookingSource'=>'POS','transactionKind'=>'pos_sale','sourceEntityId'=>$saleId,
-                'operationId'=>$operationId.':income','date'=>$saleDate,'documentNumber'=>$receipt
+                'operationId'=>$operationId.':income','date'=>$saleDate,'documentNumber'=>$receipt,
+                'shiftSessionId'=>$posSaleShiftSessionId
             ],$loggedInStaff);
-            attachTransactionToActorShift($pdo,$transactionId,$loggedInStaff);
+            if($posSaleShiftSessionId!==null) attachTransactionToActorShift($pdo,$transactionId,$loggedInStaff,$paymentMethod==='cash');
         }
         if($cost>0){
             $cogsTransactionId=tamasyaPosInsertTransaction($pdo,[
@@ -336,6 +360,9 @@ try {
         }
         $pdo->prepare("UPDATE pos_sales SET transaction_id=?,cogs_transaction_id=?,booking_extra_id=?,version=version+1 WHERE id=?")
             ->execute([$transactionId,$cogsTransactionId,$bookingExtraId,$saleId]);
+        if ($promoCodeId !== null) {
+            tamasyaPromotionCodeMarkUsed($pdo, $promoCodeId, $operationId . ':pos', $loggedInStaff, $subtotal, 'pos', ['discountAmount' => $discount['amount']]);
+        }
         syncJournalProjections($pdo,true);
         writeEnterpriseAudit($pdo,$loggedInStaff,'Mencatat penjualan POS','pos_sale',$saleId,null,['receiptNumber'=>$receipt,'subtotalAmount'=>$subtotal,'discountType'=>$discount['type'],'discountValue'=>$discount['value'],'discountAmount'=>$discount['amount'],'discountReason'=>$discount['reason'],'grossAmount'=>$gross,'taxAmount'=>$tax,'costAmount'=>$cost,'paymentMethod'=>$paymentMethod,'bookingId'=>$bookingId,'roomNumber'=>$roomNumber,'items'=>$summary],'web',['required'=>true]);
         logActivity($pdo,'pos_sale','Penjualan POS '.$receipt.' Rp '.number_format($gross,0,',','.').($discount['amount']>0?' setelah diskon Rp '.number_format($discount['amount'],0,',','.'):''),$loggedInStaff['id'],$posActorName);
@@ -374,7 +401,7 @@ try {
             $extras=tamasyaDecodeBookingExtras($booking['extras']??null);$found=false;
             foreach($extras as $extra){
                 if((string)($extra['id']??'')!==(string)$sale['booking_extra_id'])continue;
-                if(!empty($extra['sourceTransactionId'])||strtolower((string)($extra['paymentStatus']??'unpaid'))==='paid') throw new RuntimeException('Charge POS sudah dibayar. Gunakan prosedur refund keuangan, bukan void POS.');
+                if(!empty($extra['sourceTransactionId'])||in_array(strtolower((string)($extra['paymentStatus']??'unpaid')),['paid','partial'],true)) throw new RuntimeException('Charge POS sudah dibayar/sebagian dibayar. Gunakan prosedur refund keuangan, bukan void POS.');
                 $found=true;
             }
             if(!$found) throw new RuntimeException('Item charge POS tidak ditemukan pada folio booking.');
@@ -385,7 +412,9 @@ try {
                 ->execute([json_encode($extras,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),$newTotal,$newVat,$loggedInStaff['id'],$bookingId]);
             recalculateBookingFinancials($pdo,$bookingId,true);
         }else{
-            tamasyaPosRequireOpenShift($pdo,$loggedInStaff);
+            $refundRequiresShift=tamasyaManualTransactionRequiresOpenShift(['type'=>'expense','amount'=>(float)$sale['gross_amount'],'bankAccountId'=>$sale['bank_account_id']]);
+            $posRefundShift=tamasyaPosRequireOpenShift($pdo,$loggedInStaff,$refundRequiresShift);
+            $posRefundShiftSessionId=$posRefundShift?(string)$posRefundShift['id']:null;
             $posRefundCategory=tamasyaRequireSystemFinanceCategory($pdo,'pos_refund','expense',true);
             $refundId=tamasyaPosInsertTransaction($pdo,[
                 'type'=>'expense','category'=>(string)$posRefundCategory['name'],'categoryId'=>(string)$posRefundCategory['id'],'categorySystemKey'=>'pos_refund',
@@ -394,9 +423,10 @@ try {
                 'taxRate'=>(float)$sale['base_amount']>0?round(((float)$sale['tax_amount']/(float)$sale['base_amount'])*100,3):0,
                 'description'=>'Pembatalan '.$sale['receipt_number'].' - '.$reason,'bankAccountId'=>$sale['bank_account_id'],
                 'bookingSource'=>'POS','transactionKind'=>'pos_refund','sourceEntityId'=>$saleId,
-                'operationId'=>$operationId.':refund','date'=>date('Y-m-d'),'documentPrefix'=>'REF'
+                'operationId'=>$operationId.':refund','date'=>($sale['sale_date'] ?? date('Y-m-d')),'documentPrefix'=>'REF',
+                'shiftSessionId'=>$posRefundShiftSessionId
             ],$loggedInStaff);
-            attachTransactionToActorShift($pdo,$refundId,$loggedInStaff);
+            if($posRefundShiftSessionId!==null) attachTransactionToActorShift($pdo,$refundId,$loggedInStaff,$refundRequiresShift);
         }
         if((float)$sale['cost_amount']>0){
             $posCogsReversalCategory=tamasyaRequireSystemFinanceCategory($pdo,'pos_cogs_reversal','income',true);
@@ -405,7 +435,7 @@ try {
                 'subcategory'=>null,'subcategoryId'=>null,'subcategorySystemKey'=>null,'amount'=>(float)$sale['cost_amount'],
                 'baseAmount'=>(float)$sale['cost_amount'],'taxAmount'=>0,'taxRate'=>0,'description'=>'Pemulihan HPP '.$sale['receipt_number'],
                 'bankAccountId'=>'inventory_asset','bookingId'=>$sale['booking_id'],'bookingSource'=>'POS','transactionKind'=>'pos_cogs_reversal',
-                'sourceEntityId'=>$saleId,'operationId'=>$operationId.':cogs-reversal','date'=>date('Y-m-d'),'documentPrefix'=>'COGR',
+                'sourceEntityId'=>$saleId,'operationId'=>$operationId.':cogs-reversal','date'=>($sale['sale_date'] ?? date('Y-m-d')),'documentPrefix'=>'COGR',
                 'shiftExempt'=>true,'shiftExemptionReason'=>'Jurnal non-kas pembalik harga pokok penjualan POS'
             ],$loggedInStaff);
         }

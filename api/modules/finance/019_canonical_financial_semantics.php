@@ -60,7 +60,7 @@ function tamasyaRecognizedRevenueAmount(array $tx): float {
     if(is_numeric($baseRaw)&&is_numeric($taxRaw)){
         $base=max(0.0,round((float)$baseRaw,2));
         $tax=max(0.0,round((float)$taxRaw,2));
-        if(abs(($base+$tax)-$gross)<=1.0){
+        if(abs(($base+$tax)-$gross)<=0.01){
             return round(max(0.0,$gross-min($gross,$tax)),2);
         }
     }
@@ -109,7 +109,7 @@ function tamasyaTransactionSemantics(array $tx): array {
     $isTaxUnresolvedReceipt=$isIncome&&$taxStatus==='unresolved';
     $recognizedRevenue=tamasyaRecognizedRevenueAmount($tx);
     // Tax suspense affects recognized revenue, not the receipt of actual cash.
-    $isLiquidExternalIncome=$isIncome&&!$isOpeningBalance&&!$isDepositForfeit&&!$isTechnicalNonLiquid&&(!$isInternalTransfer||$isOtaTransfer);
+    $isLiquidExternalIncome=$isIncome&&!$isOpeningBalance&&!$isDepositForfeit&&!$isTechnicalNonLiquid&&!$isInternalTransfer;
     $isLiquidExternalExpense=$isExpense&&!$isTechnicalNonLiquid&&!$isInternalTransfer;
 
     if($isSecurityDeposit)$bucket='security_deposit';
@@ -248,9 +248,9 @@ function tamasyaJournalTaxSplit(array $row, float $gross): array {
             $base=round(max(0.0,$gross-$tax),2);
             return ['gross'=>$gross,'base'=>$base,'tax'=>$tax,'complete'=>true,'status'=>$status];
         }
-        if(in_array($status,['confirmed','complete','resolved'],true)){
-            throw new RuntimeException('Snapshot PBJT terkonfirmasi tidak seimbang dengan nominal transaksi.');
-        }
+        // A confirmed/complete/resolved snapshot that does not reconcile is treated
+        // as incomplete instead of aborting projection. This keeps confirmed-but-
+        // incomplete rows in the suspense lane for explicit revalidation.
     }
     return ['gross'=>$gross,'base'=>$gross,'tax'=>0.0,'complete'=>false,'status'=>$status?:'unresolved'];
 }

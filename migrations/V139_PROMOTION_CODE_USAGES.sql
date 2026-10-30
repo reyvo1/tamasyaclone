@@ -1,0 +1,25 @@
+-- V139 Promotion code usage audit (expand-only)
+CREATE TABLE IF NOT EXISTS promotion_code_usages (
+  id VARCHAR(80) NOT NULL,
+  promotion_code_id VARCHAR(80) DEFAULT NULL,
+  code VARCHAR(80) DEFAULT NULL,
+  usage_type VARCHAR(20) NOT NULL DEFAULT 'unknown',
+  source_type VARCHAR(20) NOT NULL DEFAULT 'unknown',
+  source VARCHAR(20) NOT NULL DEFAULT 'unknown',
+  actor_id VARCHAR(50) DEFAULT NULL,
+  actor_name VARCHAR(190) DEFAULT NULL,
+  actor VARCHAR(190) DEFAULT NULL,
+  amount DECIMAL(15,2) DEFAULT NULL,
+  discount_amount DECIMAL(15,2) DEFAULT NULL,
+  operation_id VARCHAR(100) NOT NULL,
+  property_id VARCHAR(80) DEFAULT NULL,
+  company_id VARCHAR(80) DEFAULT NULL,
+  branch_id VARCHAR(80) DEFAULT NULL,
+  entity_type VARCHAR(20) DEFAULT NULL,
+  entity_id VARCHAR(80) DEFAULT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_promo_usage_operation (operation_id),
+  KEY idx_promo_usage_code (promotion_code_id, created_at),
+  KEY idx_promo_usage_type (usage_type, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;

@@ -365,6 +365,16 @@ function resolveConfiguredTaxRule($pdo, $bookingSource, $transactionKind, $effec
     ];
 }
 
+/** Resolve the display name for a stored tax rule ID without inventing one. */
+function tamasyaTaxRuleNameById(PDO $pdo, ?string $ruleId): ?string {
+    $ruleId=trim((string)($ruleId??''));
+    if($ruleId==='')return null;
+    $stmt=$pdo->prepare("SELECT name FROM tax_rules WHERE id=? LIMIT 1");
+    $stmt->execute([$ruleId]);
+    $name=$stmt->fetchColumn();
+    return $name===false?null:(trim((string)$name)?:null);
+}
+
 /** Strict live rate-only wrapper. Historical flows use resolveConfiguredTaxRule()
  * directly so they can explicitly store unresolved historical PBJT.
  */

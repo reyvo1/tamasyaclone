@@ -59,6 +59,10 @@ function resolveOpenShiftSessionId(PDO $pdo, array $staff, bool $requiredForFina
     return $shift ? (string)$shift['id'] : null;
 }
 
+function tamasyaManualTransactionRequiresOpenShift(array $transaction): bool {
+    return tamasyaCanonicalCashLegAmount($transaction) > 0.009;
+}
+
 /**
  * Canonical physical check-in shift invariant.
  *
@@ -126,7 +130,7 @@ function tamasyaRequireOpenShiftForRoomAccessIssue(PDO $pdo, array $staff, ?arra
 }
 
 /** Source line 4818: attachTransactionToActorShift */
-function attachTransactionToActorShift(PDO $pdo, string $transactionId, array $actor): ?string {
+function attachTransactionToActorShift(PDO $pdo, string $transactionId, array $actor, ?bool $required = null): ?string {
     if(!$pdo->inTransaction()) throw new RuntimeException('Pengaitan transaksi ke shift wajib berada dalam transaksi database.');
     $transactionId=trim($transactionId);
     if($transactionId==='')throw new InvalidArgumentException('ID transaksi kosong saat mengaitkan shift.');
@@ -141,7 +145,9 @@ function attachTransactionToActorShift(PDO $pdo, string $transactionId, array $a
     }
     $existingShift=trim((string)($transaction['shiftSessionId']??''));
     if($existingShift!=='')return $existingShift;
-    $required=(int)$pdo->query("SELECT require_open_shift_for_sale FROM hotel_operational_settings WHERE id='system_default' LIMIT 1")->fetchColumn()===1;
+    if($required===null){
+        $required=(int)$pdo->query("SELECT require_open_shift_for_sale FROM hotel_operational_settings WHERE id='system_default' LIMIT 1")->fetchColumn()===1;
+    }
     $shiftSessionId=resolveOpenShiftSessionId($pdo,$actor,$required);
     if($shiftSessionId!==null){
         tamasyaAssignTransactionShiftIfEligible($pdo,$transactionId,$shiftSessionId,$actor);

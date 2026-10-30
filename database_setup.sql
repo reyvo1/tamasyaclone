@@ -1541,6 +1541,63 @@ CREATE TABLE `pos_stock_movements` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 
+-- TABLE: promotion_codes
+CREATE TABLE `promotion_codes` (
+  `id` varchar(80) NOT NULL,
+  `code` varchar(80) NOT NULL,
+  `title` varchar(190) NOT NULL,
+  `description` text DEFAULT NULL,
+  `discount_type` varchar(20) NOT NULL DEFAULT 'fixed',
+  `discount_value` decimal(15,3) NOT NULL DEFAULT 0.000,
+  `min_spend` decimal(15,2) NOT NULL DEFAULT 0.00,
+  `max_discount` decimal(15,2) DEFAULT NULL,
+  `valid_from` date DEFAULT NULL,
+  `valid_until` date DEFAULT NULL,
+  `usage_limit` int(11) DEFAULT NULL,
+  `used_count` int(11) NOT NULL DEFAULT 0,
+  `status` varchar(30) NOT NULL DEFAULT 'draft',
+  `applies_to` varchar(20) NOT NULL DEFAULT 'both',
+  `auto_apply` tinyint(1) NOT NULL DEFAULT 0,
+  `event_name` varchar(190) DEFAULT NULL,
+  `stackable` tinyint(1) NOT NULL DEFAULT 0,
+  `created_by` varchar(50) DEFAULT NULL,
+  `updated_by` varchar(50) DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT current_timestamp(),
+  `updated_at` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  `operation_id` varchar(100) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `code` (`code`),
+  KEY `idx_promo_code_status_validity` (`status`,`valid_from`,`valid_until`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+
+-- TABLE: promotion_code_usages
+CREATE TABLE `promotion_code_usages` (
+  `id` varchar(80) NOT NULL,
+  `promotion_code_id` varchar(80) DEFAULT NULL,
+  `code` varchar(80) DEFAULT NULL,
+  `usage_type` varchar(20) NOT NULL DEFAULT 'unknown',
+  `source_type` varchar(20) NOT NULL DEFAULT 'unknown',
+  `source` varchar(20) NOT NULL DEFAULT 'unknown',
+  `actor_id` varchar(50) DEFAULT NULL,
+  `actor_name` varchar(190) DEFAULT NULL,
+  `actor` varchar(190) DEFAULT NULL,
+  `amount` decimal(15,2) DEFAULT NULL,
+  `discount_amount` decimal(15,2) DEFAULT NULL,
+  `operation_id` varchar(100) NOT NULL,
+  `property_id` varchar(80) DEFAULT NULL,
+  `company_id` varchar(80) DEFAULT NULL,
+  `branch_id` varchar(80) DEFAULT NULL,
+  `entity_type` varchar(20) DEFAULT NULL,
+  `entity_id` varchar(80) DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_promo_usage_operation` (`operation_id`),
+  KEY `idx_promo_usage_code` (`promotion_code_id`,`created_at`),
+  KEY `idx_promo_usage_type` (`usage_type`,`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+
 -- TABLE: public_promotions
 CREATE TABLE `public_promotions` (
   `id` varchar(80) NOT NULL,
@@ -1579,6 +1636,7 @@ CREATE TABLE `public_reservation_requests` (
   `room_type_id` varchar(80) NOT NULL,
   `extra_request` text DEFAULT NULL,
   `notes` text DEFAULT NULL,
+  `promo_code` varchar(80) DEFAULT NULL,
   `source` varchar(30) NOT NULL DEFAULT 'website',
   `status` varchar(30) NOT NULL DEFAULT 'pending_review',
   `request_fingerprint` varchar(64) DEFAULT NULL,
@@ -3042,6 +3100,7 @@ CREATE TABLE `transactions` (
   `shiftExemptionReason` varchar(255) DEFAULT NULL,
   `taxNote` varchar(255) DEFAULT NULL,
   `taxRuleId` varchar(100) DEFAULT NULL,
+  `taxRuleName` varchar(150) DEFAULT NULL,
   `taxSnapshotStatus` varchar(30) NOT NULL DEFAULT 'unresolved',
   `taxSource` varchar(40) DEFAULT NULL,
   `serviceDate` date DEFAULT NULL,

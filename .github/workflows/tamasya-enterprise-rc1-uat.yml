@@ -162,6 +162,10 @@ jobs:
           php tests/telegram-leave-identity-regression.php
           php tests/telegram-key-status-contract-regression.php
           php tests/telegram-expense-input-regression.php
+          php tests/telegram-expense-performance-regression.php
+          php tests/expense-shift-policy-regression.php
+          php tests/finance-shift-telegram-corrections-regression.php
+          php tests/booking-tax-metadata-regression.php
           php tests/finance-regression.php
           php tests/hybrid-regression.php
           node tests/realtime-regression.mjs
@@ -257,6 +261,7 @@ jobs:
             tests/uat_rc1/assert_full_complete.py \
             tests/production-hardening-regression.php \
             tests/production-hardening-regression.mjs \
+            tests/audit-fixes-2026-10-30-regression.php \
             tests/report-download-ui-regression.mjs \
             tests/owner-readonly-regression.php \
             tests/owner-readonly-regression.mjs \

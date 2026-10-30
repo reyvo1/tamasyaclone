@@ -7,6 +7,7 @@ if (!defined('TAMASYA_API_ENTRY')) { http_response_code(404); exit; }
 if (!function_exists('validIsoDate')) require_once dirname(__DIR__, 2).'/support/012_domain_primitives.php';
 if (!function_exists('tamasyaResolvePaymentAccount')) require_once __DIR__.'/018_canonical_business_policy.php';
 if (!function_exists('tamasyaFinancialCommit')) require_once __DIR__.'/019_canonical_financial_semantics.php';
+if (!function_exists('tamasyaPromotionCodesEnabled')) require_once dirname(__DIR__, 2).'/support/120_promotion_codes.php';
 
 /** Source line 2553: bumpServerRevision */
 function bumpServerRevision($pdo) {
@@ -346,8 +347,8 @@ function recordBookingDeposit(PDO $pdo, array $actor, string $bookingId, array $
     $bookingStatus=strtolower((string)($booking['status']??''));
     $isFinancialClosurePayment=$bookingStatus==='completed' && strtolower((string)($booking['financialClosureStatus']??''))==='pending';
     if(!in_array($bookingStatus,['reserved','active'],true) && !$isFinancialClosurePayment)throw new RuntimeException('Pembayaran hanya dapat diterima untuk reservasi/booking aktif atau piutang checkout operasional.');
-    $settings=$pdo->query("SELECT require_open_shift_for_sale FROM hotel_operational_settings WHERE id='system_default' LIMIT 1")->fetchColumn();
-    $shiftSessionId=resolveOpenShiftSessionId($pdo,$actor,(int)$settings===1);
+    $depositRequiresShift=tamasyaManualTransactionRequiresOpenShift(['type'=>'income','amount'=>$amount,'bankAccountId'=>$bankAccountId]);
+    $shiftSessionId=resolveOpenShiftSessionId($pdo,$actor,$depositRequiresShift);
     $ledgerBefore=bookingLedgerTotals($pdo,$bookingId);
     $isOpenEnded=(int)($booking['isOpenEnded']??0)===1;
     $total=max(0.0,(float)($booking['totalAmount']??0));
@@ -377,7 +378,6 @@ function recordBookingDeposit(PDO $pdo, array $actor, string $bookingId, array $
     // every deposit it wrote failed that integrity gate on the next posting. The
     // resulting poison row then blocked unrelated live postings as well, which is
     // how an audit correction on a closed shift could never be saved.
-    $depositTaxRule=resolveConfiguredTaxRule($pdo,$bookingSource,$transactionKind,$date);
     tamasyaPostFinancialTransaction($pdo,[
         'id'=>$txId,'type'=>'income','category'=>getRoomRentalCategoryName($pdo),'categorySystemKey'=>'room_rental',
         'subcategory'=>(string)($booking['roomType']??''),'roomNumber'=>(string)$booking['roomNumber'],'amount'=>$amount,'date'=>$date,
@@ -385,8 +385,9 @@ function recordBookingDeposit(PDO $pdo, array $actor, string $bookingId, array $
         'bookingId'=>$bookingId,'bookingSource'=>$bookingSource,'baseAmount'=>(float)$tax['baseAmount'],'taxAmount'=>(float)$tax['taxAmount'],
         'taxRate'=>$tax['taxRate'],'transactionKind'=>$transactionKind,'sourceEntity'=>'booking','sourceEntityId'=>$bookingId,
         'isSystemGenerated'=>1,'operationId'=>$operationId,'shiftSessionId'=>$shiftSessionId,'updatedBy'=>$actor['id']??null,
-        'taxRuleId'=>($depositTaxRule['matched']??false)?(string)$depositTaxRule['ruleId']:null,
-        'taxSource'=>'live_rule','taxSnapshotStatus'=>'confirmed',
+        'taxRuleId'=>null,
+        'taxRuleName'=>null,
+        'taxSource'=>'booking_component_allocation','taxSnapshotStatus'=>'confirmed',
         'updatedSource'=>$source,'version'=>1
     ],$actor,'booking',['lockCatalog'=>true,'source'=>$source]);
     tamasyaAttachBookingReceiptRevenueAllocations($pdo,$booking,$txId,$amount,(float)$ledgerBefore['net'],$operationId,$actor,$source,$date);
@@ -428,7 +429,9 @@ function recordBookingDeposit(PDO $pdo, array $actor, string $bookingId, array $
 function tamasyaRefundShareForBooking(array $income, array $allocations, string $bookingId): array {
     $incomeAmount = max(0.0, round((float)($income['amount'] ?? 0), 2));
     $incomeTax = max(0.0, round((float)($income['taxAmount'] ?? 0), 2));
-    $incomeBase = max(0.0, round((float)($income['baseAmount'] ?? max(0.0, $incomeAmount - $incomeTax)), 2));
+    $incomeBase = array_key_exists('baseAmount', $income) && $income['baseAmount'] !== null && $income['baseAmount'] !== ''
+        ? max(0.0, round((float)$income['baseAmount'], 2))
+        : max(0.0, round($incomeAmount - $incomeTax, 2));
     $allocatedAmount = 0.0;
     $allocatedBase = 0.0;
     $allocatedTax = 0.0;
@@ -552,6 +555,14 @@ function createBookingRefundTransactions($pdo, array $booking, array $actor, $so
         }
         $refundExists->execute([$refundId,$operationId]);
         if(!$refundExists->fetchColumn()){
+            $refundRequiresShift=tamasyaManualTransactionRequiresOpenShift([
+                'type'=>'expense','amount'=>$amount,
+                'bankAccountId'=>$incomeSplitValid?null:($income['bankAccountId']??null),
+                'isSplitPayment'=>$incomeSplitValid?1:0,
+                'splitCashAmount'=>$refundSplitCash,'splitTransferAmount'=>$refundSplitTransfer,
+                'splitTransferBankAccountId'=>$refundSplitBank
+            ]);
+            $refundShiftSessionId=resolveOpenShiftSessionId($pdo,$actor,$refundRequiresShift);
             tamasyaPostFinancialTransaction($pdo,[
                 'id'=>$refundId,'type'=>'expense','category'=>$share['category']??null?:($income['category']??getRoomRentalCategoryName($pdo)),
                 'categoryId'=>$income['categoryId']??null,'categorySystemKey'=>$income['categorySystemKey']??null,
@@ -559,17 +570,17 @@ function createBookingRefundTransactions($pdo, array $booking, array $actor, $so
                 'subcategoryId'=>$income['subcategoryId']??null,'subcategorySystemKey'=>$income['subcategorySystemKey']??null,
                 'roomNumber'=>$income['roomNumber']??($booking['roomNumber']??null),'amount'=>$amount,'date'=>date('Y-m-d'),'description'=>$description,
                 'createdBy'=>currentStaffLabel($actor),'bankAccountId'=>$incomeSplitValid?null:($income['bankAccountId']??null),'bookingId'=>$bookingId,
-                'bookingSource'=>$income['bookingSource']??($booking['bookingSource']??'Direct'),'baseAmount'=>max(0.0,(float)($share['baseAmount']??max(0.0,$amount-max(0.0,(float)($share['taxAmount']??0))))),
+                'bookingSource'=>$income['bookingSource']??($booking['bookingSource']??'Direct'),'baseAmount'=>(array_key_exists('baseAmount',$share) && $share['baseAmount'] !== null && $share['baseAmount'] !== '' ? tamasyaPosNumber($share['baseAmount']) : null),
                 'taxAmount'=>max(0.0,(float)($share['taxAmount']??0)),'taxRate'=>max(0.0,(float)($share['taxRate']??0)),
-                'taxSnapshotStatus'=>'confirmed','taxSource'=>'booking_refund_snapshot',
+                'taxSnapshotStatus'=> (array_key_exists('baseAmount',$share) && $share['baseAmount'] !== null && $share['baseAmount'] !== '') ? 'confirmed' : 'unresolved','taxSource'=>'booking_refund_snapshot',
                 'transactionKind'=>'refund','sourceEntity'=>'booking_refund','sourceEntityId'=>$sourceTxId,'isSystemGenerated'=>1,
                 'operationId'=>$operationId,'updatedBy'=>$actor['id']??null,'updatedSource'=>$source,'version'=>1,
                 'isSplitPayment'=>$incomeSplitValid?1:0,'splitCashAmount'=>$refundSplitCash,'splitTransferAmount'=>$refundSplitTransfer,
-                'splitTransferBankAccountId'=>$refundSplitBank,
+                'splitTransferBankAccountId'=>$refundSplitBank,'shiftSessionId'=>$refundShiftSessionId,
             // Refund reverses the original revenue category; retaining that identity
             // is required for contra-revenue/tax journal projection and split reversal.
             ],$actor,'booking',['source'=>$source,'allowSplitExpenseReversal'=>true,'allowSemanticTypeMismatchForReversal'=>true]);
-            attachTransactionToActorShift($pdo,$refundId,$actor);
+            if($refundShiftSessionId!==null) attachTransactionToActorShift($pdo,$refundId,$actor,$refundRequiresShift);
             $inserted += $amount;
         }
     }
@@ -1339,10 +1350,12 @@ function tamasyaAttachBookingReceiptRevenueAllocations(PDO $pdo,array $booking,s
     $uniqueRates=array_values(array_unique(array_map(static fn($v)=>number_format((float)$v,4,'.',''),$rates)));
     $aggregateRate=count($uniqueRates)===1?(float)$rates[0]:null;
     $uniqueRules=array_values(array_unique($rules));$aggregateRule=count($uniqueRules)===1?$uniqueRules[0]:null;
+    $aggregateRuleName=$aggregateRule!==null?tamasyaTaxRuleNameById($pdo,$aggregateRule):null;
     tamasyaMutateFinancialTransaction($pdo,$transactionId,[
         'baseAmount'=>$baseTotal,'taxAmount'=>$taxTotal,'taxRate'=>$aggregateRate,
         'taxSnapshotStatus'=>'confirmed','taxSource'=>'booking_component_allocation','taxRuleId'=>$aggregateRule,
-    ],$actor,'tax_projection','tax_snapshot',['source'=>$source,'lockRows'=>true,'requireAll'=>true]);
+        'taxRuleName'=>$aggregateRuleName,
+    ],$actor,'tax_projection','tax_snapshot',['source'=>$source,'lockRows'=>true,'requireAll'=>true,'requireUnlocked'=>true]);
     return ['amount'=>$amount,'baseAmount'=>$baseTotal,'taxAmount'=>$taxTotal,'taxRate'=>$aggregateRate,'allocations'=>$rows];
 }
 
@@ -1721,6 +1734,8 @@ function createCanonicalBookingWorkflow(PDO $pdo, array $actor, array $payload, 
     $scheduledCheckInAt=normalizeHotelDateTime($payload['scheduledCheckInAt']??null);
     $scheduledCheckOutAt=normalizeHotelDateTime($payload['scheduledCheckOutAt']??null);
     $totalAmount=round((float)($payload['totalAmount']??0),2);
+$discountAmount=0.0;
+$promoCodeId=null;
     $requestedPaymentStatus=strtolower(trim((string)($payload['paymentStatus']??'unpaid')));
     $paymentMethod=strtolower(trim((string)($payload['paymentMethod']??'')));
     $bankAccountId=trim((string)($payload['bankAccountId']??''));
@@ -1744,6 +1759,7 @@ function createCanonicalBookingWorkflow(PDO $pdo, array $actor, array $payload, 
     if($securityDepositRequiredAmount>0)$securityDepositRequired=1;
     $publicRequestId=trim((string)($payload['publicRequestId']??''));
     $ktpPhoto=normalizeBookingIdentityReferenceForStorage($pdo,$payload['ktpPhoto']??null);
+$promoCodeInput=trim((string)($payload['promoCode'] ?? $payload['promotionCode'] ?? $payload['promotion_code'] ?? ''));
     $broadcast=!array_key_exists('broadcast',$payload)||!empty($payload['broadcast']);
     // R6 reservation/check-in separation: booking creation must never infer physical
     // occupancy from the calendar date. A booking is reserved by default. Only an
@@ -1877,7 +1893,7 @@ function createCanonicalBookingWorkflow(PDO $pdo, array $actor, array $payload, 
 
         $publicRow=null;
         if($publicRequestId!==''){
-            $publicStmt=$pdo->prepare("SELECT public_request_id,room_type_id,status,linked_booking_id FROM public_reservation_requests WHERE public_request_id=? LIMIT 1 FOR UPDATE");
+            $publicStmt=$pdo->prepare("SELECT public_request_id,room_type_id,status,linked_booking_id,promo_code FROM public_reservation_requests WHERE public_request_id=? LIMIT 1 FOR UPDATE");
             $publicStmt->execute([$publicRequestId]);$publicRow=$publicStmt->fetch(PDO::FETCH_ASSOC);
             if(!$publicRow)throw new RuntimeException('Permintaan reservasi website tidak ditemukan.');
             if((string)($publicRow['status']??'')==='rejected')throw new RuntimeException('Permintaan reservasi website sudah ditolak.');
@@ -1892,11 +1908,47 @@ function createCanonicalBookingWorkflow(PDO $pdo, array $actor, array $payload, 
             }
             if(!$matches)throw new RuntimeException('Kamar tidak sesuai tipe pada permintaan website.');
             $bookingSource='Website';
+            if($promoCodeInput==='' && !empty($publicRow['promo_code'])){
+                $promoCodeInput=trim((string)$publicRow['promo_code']);
+            }
         }
-        $accessStmt=$pdo->prepare("SELECT * FROM room_access_control WHERE room_number=? LIMIT 1 FOR UPDATE");
+         $accessStmt=$pdo->prepare("SELECT * FROM room_access_control WHERE room_number=? LIMIT 1 FOR UPDATE");
         $accessStmt->execute([$roomNumber]);$access=$accessStmt->fetch(PDO::FETCH_ASSOC)?:['access_mode'=>'physical','physical_key_ref'=>'KEY-'.$roomNumber];
         $accessMode=in_array((string)($access['access_mode']??''),['physical','smart','hybrid'],true)?(string)$access['access_mode']:'physical';
         $checkoutDueAt=$isOpenEnded?null:(string)$stayWindow['checkoutDueAt'];
+
+$promoAppliedAmount = $totalAmount;
+    $manualDiscountProvided = !empty($payload['discountAmount']) || !empty($payload['discount']) || !empty($payload['manualDiscount'])
+        || (isset($payload['discountValue']) && (float)$payload['discountValue'] > 0) || !empty($payload['discountType']);
+    if ($promoCodeInput === '' && !$manualDiscountProvided) {
+        $autoPromo = tamasyaPromotionCodeAutoApply($pdo, 'booking', $totalAmount, validIsoDate($checkIn) ? $checkIn : date('Y-m-d'));
+        if (is_array($autoPromo) && !empty($autoPromo)) {
+            $promoCodeInput = trim((string)($autoPromo['code'] ?? $autoPromo['promotionCode']['code'] ?? ''));
+        }
+    }
+    if($promoCodeInput!==''){
+            if(!tamasyaPromotionCodesEnabled() || !tamasyaPromotionCodesSchemaReady($pdo)){
+                $e=new RuntimeException('Fitur kode promo dinonaktifkan atau schema belum siap.');
+                tamasyaFailCanonicalBookingReceipt($pdo,$operationId,$e);throw $e;
+            }
+            $promoResult=tamasyaPromotionCodeValidate($pdo,$promoCodeInput,'booking',$totalAmount);
+            $promoDiscountAmount=(float)$promoResult['discountAmount'];
+            if($promoDiscountAmount<=0 || $promoDiscountAmount>=$totalAmount){
+                $e=new RuntimeException('Diskon kode promo tidak valid untuk total booking.');
+                tamasyaFailCanonicalBookingReceipt($pdo,$operationId,$e);throw $e;
+            }
+            $promoCodeId=(string)$promoResult['promotionCode']['id'];
+            $discountAmount=$promoDiscountAmount;
+            $totalAmount=round($totalAmount-$promoDiscountAmount,2);
+            if($totalAmount<=0){
+                $e=new InvalidArgumentException('Total booking setelah diskon promo harus lebih dari nol.');
+                tamasyaFailCanonicalBookingReceipt($pdo,$operationId,$e);throw $e;
+            }
+            if($downPaymentAmount>$totalAmount+0.01){
+                $e=new InvalidArgumentException('Panjar booking melebihi total tarif setelah diskon promo.');
+                tamasyaFailCanonicalBookingReceipt($pdo,$operationId,$e);throw $e;
+            }
+        }
 
         if($downPaymentAmount>0){
             if(!in_array($downPaymentMethod,['cash','transfer','qris'],true))throw new InvalidArgumentException('Metode panjar tidak valid.');
@@ -1952,44 +2004,62 @@ function createCanonicalBookingWorkflow(PDO $pdo, array $actor, array $payload, 
         $createdAt=date('Y-m-d H:i:s');$actualCheckInAt=$lifecycleStatus==='active'?$createdAt:null;
         $initialPaymentStatus='unpaid';
         $stmt=$pdo->prepare("INSERT INTO bookings
-            (id,guestName,guestEmail,guestPhone,roomNumber,roomType,checkIn,checkOut,totalAmount,status,paymentStatus,paymentMethod,bankAccountId,
+            (id,guestName,guestEmail,guestPhone,roomNumber,roomType,checkIn,checkOut,totalAmount,discountAmount,status,paymentStatus,paymentMethod,bankAccountId,
              vatRate,vatAmount,ktpPhoto,bookingSource,isSplitPayment,splitCashAmount,splitTransferAmount,splitTransferBankAccountId,
              downPaymentAmount,downPaymentMethod,downPaymentBankAccountId,downPaymentDate,isOpenEnded,stayMode,scheduledCheckInAt,scheduledCheckOutAt,actualCheckInAt,checkoutDueAt,
              lateCheckoutStatus,keyControlStatus,accessMode,createdAt,version,updatedBy,updatedSource)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'none','not_issued',?,?,1,?,?)");
-        $stmt->execute([$bookingId,$guestName,$guestEmail,$guestPhone,$roomNumber,$roomType,$checkIn,$checkOut,$totalAmount,$lifecycleStatus,$initialPaymentStatus,$paymentMethod?:null,$bankAccountId?:null,
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'none','not_issued',?,?,1,?,?)");
+        $stmt->execute([$bookingId,$guestName,$guestEmail,$guestPhone,$roomNumber,$roomType,$checkIn,$checkOut,$totalAmount,$discountAmount,$lifecycleStatus,$initialPaymentStatus,$paymentMethod?:null,$bankAccountId?:null,
             $vatRate,$vatAmount,$ktpPhoto,$bookingSource,$isSplitPayment,$isSplitPayment?$splitCashAmount:null,$isSplitPayment?$splitTransferAmount:null,$isSplitPayment?$splitTransferBankAccountId:null,
             $downPaymentAmount,$downPaymentAmount>0?$downPaymentMethod:null,$downPaymentAmount>0?($downPaymentBankAccountId?:null):null,$downPaymentAmount>0?$downPaymentDate:null,
             $isOpenEnded,$stayMode,$scheduledCheckInAt,$scheduledCheckOutAt,$actualCheckInAt,$checkoutDueAt,$accessMode,$createdAt,$actor['id']??null,$source]);
         if($lifecycleStatus==='active')finalizeActiveBookingOperationalState($pdo,$bookingId,$roomNumber,$actor,$source);
+        if($promoCodeId!==null && $promoCodeId!==''){
+            $promoColumnExists=false;
+            try{
+                $colStmt=$pdo->prepare("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='bookings' AND COLUMN_NAME='promotion_code_id'");
+                $colStmt->execute();
+                $promoColumnExists=((int)$colStmt->fetchColumn()>0);
+                } catch (Throwable $e) { $promoColumnExists=false; }
+                if ($promoColumnExists) {
+                    $pdo->prepare('UPDATE bookings SET promotion_code_id=? WHERE id=?')->execute([$promoCodeId,$bookingId]);
+                }
+            tamasyaPromotionCodeMarkUsed($pdo,$promoCodeId,$operationId.':booking',$actor,$promoAppliedAmount,'booking',['discountAmount'=>$promoDiscountAmount]);
+        }
         if($wholesaleQuote!==null){
             $wholesaleQuote['propertyId']=(string)($GLOBALS['tamasya_property_id']??'');
             tamasyaWholesaleContractRateLock($pdo,$wholesaleQuote,$bookingId,(string)($actor['id']??''));
         }
 
-        $requireShift=(int)($settings['require_open_shift_for_sale']??1)===1;
         // FIX28R1: for create+check-in, reuse the shift row already locked by the
         // physical check-in gate. Do not perform a second non-locking lookup that could
         // conceptually detach receipt posting from the eligibility decision.
         $lockedCheckInShiftSessionId=trim((string)($checkinEligibility['shiftSessionId']??''));
-        $shiftSessionId=$financialMovement?($lockedCheckInShiftSessionId!==''?$lockedCheckInShiftSessionId:resolveOpenShiftSessionId($pdo,$actor,$requireShift)):null;
         $txIds=[];$category=getRoomRentalCategoryName($pdo);
-        $insertTx=function(array $tx)use($pdo,$actor,$bookingId,$bookingSource,$shiftSessionId,$source,&$txIds):void{
+        $insertTx=function(array $tx)use($pdo,$actor,$bookingId,$bookingSource,$lockedCheckInShiftSessionId,$source,&$txIds):void{
+            $txRequiresShift=tamasyaManualTransactionRequiresOpenShift($tx);
+            $txShiftSessionId=$lockedCheckInShiftSessionId!==''?$lockedCheckInShiftSessionId:resolveOpenShiftSessionId($pdo,$actor,$txRequiresShift);
             $ledgerBeforeReceipt=bookingLedgerTotals($pdo,$bookingId);
             // Guarded live booking income needs the tax snapshot contract; see
             // tamasyaAssertLiveTaxSnapshotIntegrity(). Omitting it writes a poison row
             // that blocks every later live posting in the hotel.
             $receiptTaxRule=resolveConfiguredTaxRule($pdo,$bookingSource,(string)($tx['transactionKind']??'booking_charge'),(string)($tx['date']??date('Y-m-d')));
+            $receiptTaxRuleId=array_key_exists('taxRuleId',$tx)
+                ? (trim((string)$tx['taxRuleId'])?:null)
+                : (($receiptTaxRule['matched']??false)?(string)$receiptTaxRule['ruleId']:null);
+            $receiptTaxRuleName=array_key_exists('taxRuleName',$tx)
+                ? (trim((string)$tx['taxRuleName'])?:null)
+                : (($receiptTaxRule['matched']??false)?(string)$receiptTaxRule['ruleName']:null);
             tamasyaPostFinancialTransaction($pdo,[
                 'id'=>$tx['id'],'type'=>'income','category'=>$tx['category'],'categorySystemKey'=>'room_rental','subcategory'=>$tx['subcategory'],
                 'roomNumber'=>$tx['roomNumber'],'amount'=>$tx['amount'],'date'=>$tx['date'],'description'=>$tx['description'],
                 'createdBy'=>currentStaffLabel($actor),'bankAccountId'=>$tx['bankAccountId']?:null,'bookingId'=>$bookingId,'bookingSource'=>$bookingSource,
                 'baseAmount'=>$tx['baseAmount'],'taxAmount'=>$tx['taxAmount'],'taxRate'=>$tx['taxRate'],'transactionKind'=>$tx['transactionKind'],
-                'taxRuleId'=>($receiptTaxRule['matched']??false)?(string)$receiptTaxRule['ruleId']:null,
-                'taxRuleName'=>($receiptTaxRule['matched']??false)?(string)$receiptTaxRule['ruleName']:null,
+                'taxRuleId'=>$receiptTaxRuleId,
+                'taxRuleName'=>$receiptTaxRuleName,
                 'taxSource'=>'live_rule','taxSnapshotStatus'=>'confirmed',
                 'sourceEntity'=>'booking','sourceEntityId'=>$bookingId,'isSystemGenerated'=>1,'operationId'=>$tx['operationId'],
-                'shiftSessionId'=>$shiftSessionId,'updatedBy'=>$actor['id']??null,'updatedSource'=>$source,'version'=>1,
+                'shiftSessionId'=>$txShiftSessionId,'updatedBy'=>$actor['id']??null,'updatedSource'=>$source,'version'=>1,
                 'isSplitPayment'=>!empty($tx['isSplitPayment'])?1:0,
                 'splitCashAmount'=>$tx['splitCashAmount']??0,
                 'splitTransferAmount'=>$tx['splitTransferAmount']??0,
@@ -2004,7 +2074,7 @@ function createCanonicalBookingWorkflow(PDO $pdo, array $actor, array $payload, 
         if($downPaymentAmount>0){
             $dpTax=resolveRoomSaleTaxBreakdown($bookingSource,$downPaymentMethod,$downPaymentBankAccountId?:null,$downPaymentAmount,$downPaymentDate);
             $label=$downPaymentMethod==='qris'?'QRIS':($downPaymentMethod==='transfer'?'Transfer':'Tunai');
-            $insertTx(['id'=>'tx_dp_'.substr(hash('sha256',$operationId),0,30),'operationId'=>$operationId.':down_payment','category'=>$category,'subcategory'=>$roomType,'roomNumber'=>$roomNumber,'amount'=>$downPaymentAmount,'date'=>$downPaymentDate,'description'=>"Penerimaan Panjar {$category} {$roomNumber} - {$guestName} ({$label}) [{$bookingSource}]",'bankAccountId'=>$downPaymentBankAccountId,'baseAmount'=>$dpTax['baseAmount'],'taxAmount'=>$dpTax['taxAmount'],'taxRate'=>$dpTax['taxRate'],'transactionKind'=>'down_payment']);
+            $insertTx(['id'=>'tx_dp_'.substr(hash('sha256',$operationId),0,30),'operationId'=>$operationId.':down_payment','category'=>$category,'subcategory'=>$roomType,'roomNumber'=>$roomNumber,'amount'=>$downPaymentAmount,'date'=>$downPaymentDate,'description'=>"Penerimaan Panjar {$category} {$roomNumber} - {$guestName} ({$label}) [{$bookingSource}]",'bankAccountId'=>$downPaymentBankAccountId,'baseAmount'=>$dpTax['baseAmount'],'taxAmount'=>$dpTax['taxAmount'],'taxRate'=>$dpTax['taxRate'],'taxRuleId'=>$dpTax['taxRuleId']??null,'taxRuleName'=>$dpTax['taxRuleName']??null,'transactionKind'=>'down_payment']);
         }
         $remaining=max(0.0,round($totalAmount-$downPaymentAmount,2));
         $remainingTax=max(0.0,round($vatAmount-(float)$dpTax['taxAmount'],2));
@@ -2023,12 +2093,13 @@ function createCanonicalBookingWorkflow(PDO $pdo, array $actor, array $payload, 
                     'amount'=>$remaining,'date'=>$paymentDate,
                     'description'=>"{$word} {$category} {$roomNumber} - {$guestName} (Split Tunai + Transfer/QRIS) [{$bookingSource}]",
                     'bankAccountId'=>null,'baseAmount'=>$remainingBase,'taxAmount'=>$remainingTax,'taxRate'=>$vatRate,'transactionKind'=>$kind,
+                    'taxRuleId'=>$roomTax['taxRuleId']??null,'taxRuleName'=>$roomTax['taxRuleName']??null,
                     'isSplitPayment'=>1,'splitCashAmount'=>$splitCashAmount,'splitTransferAmount'=>$splitTransferAmount,
                     'splitTransferBankAccountId'=>$splitTransferBankAccountId,
                 ]);
             }else{
                 $label=$paymentMethod==='qris'?'QRIS':($paymentMethod==='transfer'?'Transfer':($paymentMethod==='ota'?'Piutang OTA':'Tunai'));
-                $insertTx(['id'=>'tx_pay_'.substr(hash('sha256',$operationId),0,29),'operationId'=>$operationId.':payment','category'=>$category,'subcategory'=>$roomType,'roomNumber'=>$roomNumber,'amount'=>$remaining,'date'=>$paymentDate,'description'=>"{$word} {$category} {$roomNumber} - {$guestName} ({$label}) [{$bookingSource}]",'bankAccountId'=>$paymentMethod==='ota'?'ota_receivable':$bankAccountId,'baseAmount'=>$remainingBase,'taxAmount'=>$remainingTax,'taxRate'=>$vatRate,'transactionKind'=>$kind]);
+                $insertTx(['id'=>'tx_pay_'.substr(hash('sha256',$operationId),0,29),'operationId'=>$operationId.':payment','category'=>$category,'subcategory'=>$roomType,'roomNumber'=>$roomNumber,'amount'=>$remaining,'date'=>$paymentDate,'description'=>"{$word} {$category} {$roomNumber} - {$guestName} ({$label}) [{$bookingSource}]",'bankAccountId'=>$paymentMethod==='ota'?'ota_receivable':$bankAccountId,'baseAmount'=>$remainingBase,'taxAmount'=>$remainingTax,'taxRate'=>$vatRate,'transactionKind'=>$kind,'taxRuleId'=>$roomTax['taxRuleId']??null,'taxRuleName'=>$roomTax['taxRuleName']??null]);
             }
         }
         $securityDepositSummary=null;
@@ -2037,11 +2108,13 @@ function createCanonicalBookingWorkflow(PDO $pdo, array $actor, array $payload, 
             tamasyaSyncSecurityDepositProjection($pdo,$bookingId,$securityDepositSummary,$actor,$source);
         }
         if($securityDepositReceivedAmount>0){
+            $securityDepositShiftRequirement=tamasyaManualTransactionRequiresOpenShift(['type'=>'income','amount'=>$securityDepositReceivedAmount,'bankAccountId'=>$securityDepositBankAccountId]);
+            $securityDepositShiftSessionId=resolveOpenShiftSessionId($pdo,$actor,$securityDepositShiftRequirement);
             $securityDepositResult=tamasyaReceiveGuestSecurityDepositInTransaction($pdo,$actor,$bookingId,[
                 'amount'=>$securityDepositReceivedAmount,'requiredAmount'=>$securityDepositRequiredAmount,
                 'paymentMethod'=>$securityDepositPaymentMethod,'bankAccountId'=>$securityDepositBankAccountId,
                 'date'=>$securityDepositDate,'operationId'=>'gsd_receive_'.substr(hash('sha256',$operationId),0,70)
-            ],$source,$shiftSessionId);
+            ],$source,$securityDepositShiftSessionId);
             $securityDepositSummary=$securityDepositResult['summary'];
             if(!empty($securityDepositResult['transactionId']))$txIds[]=$securityDepositResult['transactionId'];
         }
@@ -2076,7 +2149,7 @@ function createCanonicalBookingWorkflow(PDO $pdo, array $actor, array $payload, 
         $telegramMessage=$lifecycleStatus==='active'
             ?getCheckInTelegramMessage($messagePayload,$roomType,$taxDetail,currentStaffLabel($actor))
             :"📅 *RESERVASI DIBUAT*\n\n👤 Tamu: *{$guestName}*\n🔑 Kamar: *{$roomNumber}* ({$roomType})\n🗓 Menginap: *{$checkIn}* s.d. *{$checkOut}*\n💳 Status: *".strtoupper((string)($final['paymentStatus']??'unpaid'))."*\n📡 Sumber: *{$bookingSource}*";
-        $result=['bookingId'=>$bookingId,'bookingStatus'=>$lifecycleStatus,'stayMode'=>$stayMode,'scheduledCheckInAt'=>$scheduledCheckInAt,'scheduledCheckOutAt'=>$scheduledCheckOutAt,'paymentStatus'=>$final['paymentStatus']??'unpaid','amountPaid'=>(float)($final['amountPaid']??0),'balanceDue'=>(float)($final['balanceDue']??0),'roomNumber'=>$roomNumber,'roomType'=>$roomType,'totalAmount'=>$totalAmount,'vatRate'=>$vatRate,'vatAmount'=>$vatAmount,'transactionIds'=>$txIds,'operationId'=>$operationId,'lifecycleIntent'=>$lifecycleIntent,'securityDeposit'=>$securityDepositSummary,'telegramMessage'=>$telegramMessage];
+        $result=['bookingId'=>$bookingId,'bookingStatus'=>$lifecycleStatus,'stayMode'=>$stayMode,'scheduledCheckInAt'=>$scheduledCheckInAt,'scheduledCheckOutAt'=>$scheduledCheckOutAt,'paymentStatus'=>$final['paymentStatus']??'unpaid','amountPaid'=>(float)($final['amountPaid']??0),'balanceDue'=>(float)($final['balanceDue']??0),'roomNumber'=>$roomNumber,'roomType'=>$roomType,'totalAmount'=>$totalAmount,'discountAmount'=>$discountAmount,'vatRate'=>$vatRate,'vatAmount'=>$vatAmount,'transactionIds'=>$txIds,'operationId'=>$operationId,'lifecycleIntent'=>$lifecycleIntent,'securityDeposit'=>$securityDepositSummary,'telegramMessage'=>$telegramMessage];
         tamasyaCompleteCanonicalBookingReceipt($pdo,$operationId,$result);
         if(!$joinGroupTransaction)tamasyaFinancialCommit($pdo);
         if(!$joinGroupTransaction&&$broadcast&&$telegramMessage!=='')broadcastTelegramNotification($pdo,$telegramMessage);

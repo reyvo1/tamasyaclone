@@ -209,7 +209,7 @@ function tamasyaCanonicalTransactionColumns(): array {
         'subcategory','subcategoryId','subcategorySystemKey','roomNumber','proofUrl','bankAccountId','bookingId','baseAmount','currency','exchangeRate','propertyAmount','taxAmount','taxRate',
         'bookingSource','version','updatedAt','updatedBy','updatedSource','transactionKind','sourceEntity','sourceEntityId','isSystemGenerated','operationId',
         'shiftSessionId','lockedAt','reconciliationStatus','reconciliationReference','documentNumber','importBatchId','recordOrigin','shiftExempt','shiftExemptionReason',
-        'taxNote','taxRuleId','taxSnapshotStatus','taxSource','serviceDate','historicalSourceType','historicalSourceReference','sourceReportedBy','reportingPeriod',
+        'taxNote','taxRuleId','taxRuleName','taxSnapshotStatus','taxSource','serviceDate','historicalSourceType','historicalSourceReference','sourceReportedBy','reportingPeriod',
         'periodStatusAtEntry','periodImpactStatus','requiresTaxAmendment','historicalReviewStatus','historicalReviewedBy','historicalReviewedAt','periodCorrectionReason','inputDelayDays',
         'isSplitPayment','splitCashAmount','splitTransferAmount','splitTransferBankAccountId'
     ];
@@ -227,27 +227,27 @@ function tamasyaCanonicalTransactionColumns(): array {
 function tamasyaCanonicalCashLegAmount(array $tx): float {
     $amount=max(0.0,round((float)($tx['amount']??0),2));
     if((int)($tx['isSplitPayment']??0)===1){
-        return max(0.0,round((float)($tx['splitCashAmount']??0),2));
+        $cash=max(0.0,round((float)($tx['splitCashAmount']??0),2));
+        $transfer=max(0.0,round((float)($tx['splitTransferAmount']??0),2));
+        if(abs(($cash+$transfer)-$amount)>0.01) throw new DomainException('Nominal split payment tidak sesuai total transaksi.');
+        return $cash;
     }
     $account=strtolower(trim((string)($tx['bankAccountId']??'')));
     return ($account===''||$account==='cash')?$amount:0.0;
 }
 
-function tamasyaAssertOpenShiftCashCanCoverExpense(PDO $pdo,array $tx): void {
-    if(strtolower(trim((string)($tx['type']??'')))!=='expense')return;
-    $shiftId=trim((string)($tx['shiftSessionId']??''));
-    if($shiftId==='')return;
-    $cashOut=tamasyaCanonicalCashLegAmount($tx);
-    if($cashOut<=0)return;
+function tamasyaPostingCashIsExempt(array $tx): bool {
+    return !empty($tx['shiftExempt'])
+        || strtolower(trim((string)($tx['recordOrigin']??'live_operation')))==='historical_import';
+}
 
+function tamasyaOpenShiftCashState(PDO $pdo,string $shiftId,?string $excludeTransactionId=null): array {
     $shiftStmt=$pdo->prepare("SELECT id,status,opening_cash FROM shift_sessions WHERE id=? LIMIT 1 FOR UPDATE");
     $shiftStmt->execute([$shiftId]);
     $shift=$shiftStmt->fetch(PDO::FETCH_ASSOC);
-    if(!$shift||strtolower(trim((string)($shift['status']??'')))!=='open'){
-        throw new DomainException('Pengeluaran tunai ditolak karena shift kas tidak ditemukan atau sudah ditutup.');
-    }
+    if(!$shift)return ['shift'=>null,'available'=>0.0];
 
-    $totalsStmt=$pdo->prepare("SELECT
+    $sql="SELECT
         COALESCE(SUM(CASE WHEN type='income' AND COALESCE(transactionKind,'manual')<>'security_deposit_forfeit' THEN
             CASE
                 WHEN COALESCE(isSplitPayment,0)=1 AND COALESCE(splitCashAmount,0)>0 AND COALESCE(splitTransferAmount,0)>0
@@ -264,14 +264,70 @@ function tamasyaAssertOpenShiftCashCanCoverExpense(PDO $pdo,array $tx): void {
                 WHEN (bankAccountId IS NULL OR bankAccountId='' OR bankAccountId='cash') THEN amount
                 ELSE 0
             END ELSE 0 END),0) AS cash_expense
-        FROM transactions WHERE shiftSessionId=?");
-    $totalsStmt->execute([$shiftId]);
+        FROM transactions WHERE shiftSessionId=?";
+    $params=[$shiftId];
+    if($excludeTransactionId!==null && trim($excludeTransactionId)!==''){
+        $sql.=" AND id<>?";
+        $params[]=trim($excludeTransactionId);
+    }
+    $totalsStmt=$pdo->prepare($sql);
+    $totalsStmt->execute($params);
     $totals=$totalsStmt->fetch(PDO::FETCH_ASSOC)?:[];
     $available=round((float)($shift['opening_cash']??0)+(float)($totals['cash_income']??0)-(float)($totals['cash_expense']??0),2);
+    return ['shift'=>$shift,'available'=>$available];
+}
+
+function tamasyaAssertOpenShiftCashCanCoverExpenseExcluding(PDO $pdo,array $tx,?string $excludeTransactionId=null): void {
+    if(strtolower(trim((string)($tx['type']??'')))!=='expense')return;
+    $cashOut=tamasyaCanonicalCashLegAmount($tx);
+    if($cashOut<=0)return;
+    $shiftId=trim((string)($tx['shiftSessionId']??''));
+    if($shiftId===''){
+        if(tamasyaPostingCashIsExempt($tx))return;
+        throw new DomainException('Pengeluaran tunai wajib terhubung ke shift kas aktif. Buka shift kas atau gunakan transfer/QRIS.');
+    }
+
+    $state=tamasyaOpenShiftCashState($pdo,$shiftId,$excludeTransactionId);
+    $shift=$state['shift'];
+    if(!$shift||strtolower(trim((string)($shift['status']??'')))!=='open'){
+        throw new DomainException('Pengeluaran tunai ditolak karena shift kas tidak ditemukan atau sudah ditutup.');
+    }
+    $available=(float)$state['available'];
     if($cashOut>$available+0.009){
         throw new DomainException(
             'Kas shift tidak mencukupi untuk pengeluaran tunai. Tersedia Rp '.number_format(max(0,$available),0,',','.').
             ', dibutuhkan Rp '.number_format($cashOut,0,',','.').'. Gunakan transfer/QRIS atau tambahkan kas melalui workflow resmi.'
+        );
+    }
+}
+
+function tamasyaAssertOpenShiftCashCanCoverExpense(PDO $pdo,array $tx): void {
+    tamasyaAssertOpenShiftCashCanCoverExpenseExcluding($pdo,$tx,null);
+}
+
+function tamasyaAssertOpenShiftCashProjection(PDO $pdo,array $tx,?string $excludeTransactionId=null): void {
+    $type=strtolower(trim((string)($tx['type']??'')));
+    if(!in_array($type,['income','expense'],true))return;
+    $cashLeg=tamasyaCanonicalCashLegAmount($tx);
+    if($cashLeg<=0 && ($excludeTransactionId===null || trim($excludeTransactionId)===''))return;
+    $shiftId=trim((string)($tx['shiftSessionId']??''));
+    if($shiftId==='' && $cashLeg<=0)return;
+    if($shiftId===''){
+        if(tamasyaPostingCashIsExempt($tx))return;
+        throw new DomainException('Transaksi tunai live wajib terhubung ke shift kas aktif. Buka shift kas atau gunakan transfer/QRIS.');
+    }
+
+    $state=tamasyaOpenShiftCashState($pdo,$shiftId,$excludeTransactionId);
+    $shift=$state['shift'];
+    if(!$shift||strtolower(trim((string)($shift['status']??'')))!=='open'){
+        throw new DomainException('Transaksi tunai ditolak karena shift kas tidak ditemukan atau sudah ditutup.');
+    }
+    $available=(float)$state['available'];
+    $projected=round($available+($type==='income'?$cashLeg:-$cashLeg),2);
+    if($projected < -0.009){
+        throw new DomainException(
+            'Perubahan transaksi tunai akan membuat saldo kas shift negatif. Tersedia Rp '.number_format(max(0,$available),0,',','.').
+            ', dampak kas baru Rp '.number_format($cashLeg,0,',','.').'. Gunakan transfer/QRIS atau sesuaikan nominal.'
         );
     }
 }

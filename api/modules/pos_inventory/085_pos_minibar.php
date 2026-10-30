@@ -167,7 +167,8 @@ function tamasyaPosInsertTransaction(PDO $pdo, array $tx, array $actor): string 
         'taxRuleId'=>$tx['taxRuleId']??null,'taxNote'=>$tx['taxNote']??null,'bookingId'=>$tx['bookingId']??null,'bookingSource'=>(string)($tx['bookingSource']??'POS'),
         'transactionKind'=>(string)$tx['transactionKind'],'sourceEntity'=>'pos_sale','sourceEntityId'=>(string)$tx['sourceEntityId'],'isSystemGenerated'=>1,
         'operationId'=>$operationId,'documentNumber'=>$documentNumber,'recordOrigin'=>'live_operation','shiftExempt'=>!empty($tx['shiftExempt'])?1:0,
-        'shiftExemptionReason'=>$tx['shiftExemptionReason']??null,'updatedBy'=>(string)($actor['id']??'staff'),'updatedSource'=>'pos','version'=>1
+        'shiftExemptionReason'=>$tx['shiftExemptionReason']??null,'shiftSessionId'=>$tx['shiftSessionId']??null,
+        'updatedBy'=>(string)($actor['id']??'staff'),'updatedSource'=>'pos','version'=>1
     ];
     tamasyaPostFinancialTransaction($pdo,$posting,$actor,'pos',['source'=>'pos']);
     return $id;
@@ -193,9 +194,12 @@ function tamasyaPosAssertShiftFresh(array $shift, ?DateTimeImmutable $now = null
     }
 }
 
-function tamasyaPosRequireOpenShift(PDO $pdo, array $actor): array {
+function tamasyaPosRequireOpenShift(PDO $pdo, array $actor, bool $required = true): ?array {
     $shift = getOpenShiftForStaff($pdo, (string)($actor['id'] ?? ''), $pdo->inTransaction());
-    if (!$shift) throw new RuntimeException('Penjualan POS langsung wajib dilakukan pada shift kas yang aktif. Buka shift terlebih dahulu.');
+    if (!$shift) {
+        if ($required) throw new RuntimeException('Transaksi tunai POS wajib dilakukan pada shift kas yang aktif. Buka shift terlebih dahulu.');
+        return null;
+    }
     tamasyaPosAssertShiftFresh($shift);
     return $shift;
 }

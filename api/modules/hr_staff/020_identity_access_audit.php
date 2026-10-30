@@ -499,6 +499,7 @@ function tamasyaTransactionAuditSnapshot(?array $row): ?array {
         'taxSnapshotStatus'=>$row['taxSnapshotStatus']??null,
         'taxSource'=>$row['taxSource']??null,
         'taxRuleId'=>$row['taxRuleId']??null,
+        'taxRuleName'=>$row['taxRuleName']??null,
         'taxNote'=>$row['taxNote']??null,
         'transactionKind'=>(string)($row['transactionKind']??''),
         'sourceEntity'=>$row['sourceEntity']??null,

@@ -253,6 +253,15 @@ SET @sql := IF(
 );
 PREPARE tamasya_stmt FROM @sql; EXECUTE tamasya_stmt; DEALLOCATE PREPARE tamasya_stmt;
 
+-- taxRuleName
+SET @sql := IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'transactions' AND COLUMN_NAME = 'taxRuleName') = 0,
+  'ALTER TABLE `transactions` ADD COLUMN `taxRuleName` varchar(150) DEFAULT NULL',
+  'SELECT ''SKIP taxRuleName: sudah ada'' AS migration_info'
+);
+PREPARE tamasya_stmt FROM @sql; EXECUTE tamasya_stmt; DEALLOCATE PREPARE tamasya_stmt;
+
 -- taxSnapshotStatus
 SET @sql := IF(
   (SELECT COUNT(*) FROM information_schema.COLUMNS
@@ -351,7 +360,7 @@ WHERE TABLE_SCHEMA = DATABASE()
     'serviceDate','historicalSourceType','historicalSourceReference','sourceReportedBy',
     'reportingPeriod','periodStatusAtEntry','periodImpactStatus','requiresTaxAmendment',
     'historicalReviewStatus','historicalReviewedBy','historicalReviewedAt',
-    'periodCorrectionReason','inputDelayDays','taxNote','taxRuleId','taxSnapshotStatus',
+    'periodCorrectionReason','inputDelayDays','taxNote','taxRuleId','taxRuleName','taxSnapshotStatus',
     'taxSource','isSplitPayment','splitCashAmount','splitTransferAmount','splitTransferBankAccountId'
   )
 ORDER BY COLUMN_NAME;

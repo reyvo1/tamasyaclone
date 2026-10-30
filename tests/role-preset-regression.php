@@ -106,7 +106,7 @@ presetCheck(count($seedRows[1]) === 9 && !in_array('owner', $seedRows[1], true) 
 $baseline = file_get_contents(dirname(__DIR__).'/database_setup.sql');
 presetCheck(str_contains($baseline, 'CREATE TABLE IF NOT EXISTS `role_capability_presets`') && str_contains($baseline, 'INSERT IGNORE INTO `role_capability_presets`'), 'database_setup.sql memuat tabel + seed paket jabatan');
 preg_match_all('/^CREATE TABLE/m', $baseline, $baselineTables);
-presetCheck(count($baselineTables[0]) === 131, 'Baseline = 131 CREATE TABLE (116 + role_capability_presets + staff_job_titles + 7 tabel Dynamic RBAC + exchange_rates)');
+presetCheck(count($baselineTables[0]) === 133, 'Baseline = 133 CREATE TABLE (116 + role_capability_presets + staff_job_titles + 7 tabel Dynamic RBAC + exchange_rates + promotion_codes + promotion_code_usages)');
 $staffChunk = file_get_contents(dirname(__DIR__).'/assets/chunks/staff.js');
 presetCheck(str_contains($staffChunk, 'function RolePresetPanel(') && str_contains($staffChunk, 'export {QleBridge as Qle};') && str_contains($staffChunk, 'function Qle({currentRole:e,onRefreshData:a,currentPermissions:tamasyaCurrentPermissions})') && str_contains($staffChunk, 't.jsx(Qle,{currentPermissions:tamasyaCurrentPermissions,currentRole:e,onRefreshData:a})') && str_contains($staffChunk, 'function QleBridge({currentRole:e,onRefreshData:a,currentPermissions:tamasyaCurrentPermissions})'), 'UI: panel Kelola Jabatan + bridge Qle meneruskan currentPermissions ke Qle asli');
 presetCheck(str_contains($staffChunk, 'const[rpOpen,setRpOpen]=f.useState(!1);') && str_contains($staffChunk, 'rpOpen?"":"hidden"'), 'UI: panel Kelola Jabatan terlipat default agar centangan tidak tampil dobel dengan form akun');

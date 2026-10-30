@@ -2494,7 +2494,7 @@ function runRc410151514TelegramJournalRepair(PDO $pdo): void {
 
 /** RC4.10.15.15.16: unified live/manual tax snapshots and unresolved audit state. */
 function runRc410151516DynamicHistoricalTaxSync(PDO $pdo): void {
-    $version='2026.08.rc4.10.15.15.16-dynamic-historical-tax-sync.1';
+    $version='2026.08.rc4.10.15.15.16-dynamic-historical-tax-sync.2';
     if(!$pdo||schemaMigrationApplied($pdo,$version))return;
     $lock=false;
     try{
@@ -2504,6 +2504,7 @@ function runRc410151516DynamicHistoricalTaxSync(PDO $pdo): void {
             ['taxSnapshotStatus',"VARCHAR(30) NOT NULL DEFAULT 'legacy'"],
             ['taxSource',"VARCHAR(40) NULL"],
             ['taxRuleId',"VARCHAR(100) NULL"],
+            ['taxRuleName',"VARCHAR(150) NULL"],
             ['taxNote',"VARCHAR(255) NULL"]
         ] as $column)ensureColumnExists($pdo,'transactions',$column[0],$column[1]);
         // Split-payment snapshot on manual/historical transactions (FIX29): mirrors
@@ -2538,7 +2539,7 @@ function runRc410151516DynamicHistoricalTaxSync(PDO $pdo): void {
                 a.tax_source=COALESCE(NULLIF(t.taxSource,''),'unresolved'),
                 a.tax_rule_id=t.taxRuleId
             WHERE a.tax_snapshot_status IS NULL OR a.tax_snapshot_status='' OR a.tax_snapshot_status='legacy'");
-        $pdo->prepare("INSERT INTO schema_migrations(version,description,applied_at) VALUES (?,'Unify live and historical tax snapshots, retain effective rule identity, and expose unresolved PBJT instead of tax zero',CURRENT_TIMESTAMP)")->execute([$version]);
+        $pdo->prepare("INSERT INTO schema_migrations(version,description,applied_at) VALUES (?,'Unify live and historical tax snapshots, retain effective rule identity and display name, and expose unresolved PBJT instead of tax zero',CURRENT_TIMESTAMP)")->execute([$version]);
     }catch(Throwable $e){
         error_log(clientExceptionMessage('[dynamic historical tax sync 15.16] migration failed',$e));
     }finally{

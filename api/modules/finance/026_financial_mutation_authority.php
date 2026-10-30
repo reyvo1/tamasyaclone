@@ -17,7 +17,7 @@ function tamasyaFinancialMutationAuthorityVersion(): string { return 'FIX24-core
 function tamasyaFinancialMutationOperationDefinitions(): array {
     $manualEdit=[
         'type','category','categoryId','categorySystemKey','subcategory','subcategoryId','subcategorySystemKey',
-        'amount','date','description','bookingSource','baseAmount','taxAmount','taxRate','taxSnapshotStatus','taxSource','taxRuleId','taxNote',
+        'amount','date','description','bookingSource','baseAmount','taxAmount','taxRate','taxSnapshotStatus','taxSource','taxRuleId','taxRuleName','taxNote',
         'transactionKind','serviceDate','historicalSourceType','historicalSourceReference','sourceReportedBy','reportingPeriod','periodStatusAtEntry',
         'periodImpactStatus','requiresTaxAmendment','historicalReviewStatus','periodCorrectionReason','inputDelayDays',
         'roomNumber','bankAccountId','bookingId','proofUrl',
@@ -26,7 +26,7 @@ function tamasyaFinancialMutationOperationDefinitions(): array {
     ];
     $auditCorrection=[
         'type','category','subcategory','categoryId','categorySystemKey','subcategoryId','subcategorySystemKey','roomNumber','amount','date','description',
-        'bankAccountId','bookingSource','baseAmount','taxAmount','taxRate','transactionKind','reconciliationStatus','reconciliationReference',
+        'bankAccountId','bookingSource','baseAmount','taxAmount','taxRate','taxSnapshotStatus','taxSource','taxRuleId','taxRuleName','transactionKind','reconciliationStatus','reconciliationReference',
         // Audit correction must preserve/replace the same one-row split snapshot
         // used by manual create/edit and offline sync. Otherwise a locked split
         // transaction can be reversed as if the whole amount were cash.
@@ -42,7 +42,7 @@ function tamasyaFinancialMutationOperationDefinitions(): array {
         'reconciliation'=>['owner'=>'reconciliation','allowed'=>['reconciliationStatus','reconciliationReference']],
         'shift_assign'=>['owner'=>'shift','allowed'=>['shiftSessionId']],
         'shift_lock'=>['owner'=>'shift','allowed'=>['lockedAt']],
-        'tax_snapshot'=>['owner'=>'tax_projection','allowed'=>['baseAmount','taxAmount','taxRate','taxSnapshotStatus','taxSource','taxRuleId'],'touchVersion'=>true,'touchUpdatedAt'=>true,'updatedBy'=>true,'updatedSource'=>true],
+        'tax_snapshot'=>['owner'=>'tax_projection','allowed'=>['baseAmount','taxAmount','taxRate','taxSnapshotStatus','taxSource','taxRuleId','taxRuleName'],'touchVersion'=>true,'touchUpdatedAt'=>true,'updatedBy'=>true,'updatedSource'=>true],
         'allocation_touch'=>['owner'=>'booking_allocation','allowed'=>[],'touchVersion'=>true,'touchUpdatedAt'=>true,'updatedBy'=>true,'updatedSource'=>true],
         'allocation_link'=>['owner'=>'booking_allocation','allowed'=>['bookingId','bookingSource','roomNumber'],'touchVersion'=>true,'touchUpdatedAt'=>true,'updatedBy'=>true,'updatedSource'=>true],
         'allocation_unlink'=>['owner'=>'booking_allocation','allowed'=>['bookingId','bookingSource','roomNumber'],'touchVersion'=>true,'touchUpdatedAt'=>true,'updatedBy'=>true,'updatedSource'=>true],
@@ -126,9 +126,15 @@ function tamasyaMutateFinancialTransactions(PDO $pdo,array $ids,array $changes,a
 
     $ph=implode(',',array_fill(0,count($ids),'?'));
     if(!empty($options['lockRows'])){
-        $lock=$pdo->prepare("SELECT id FROM transactions WHERE id IN ($ph) FOR UPDATE");$lock->execute($ids);
-        $found=array_map('strval',$lock->fetchAll(PDO::FETCH_COLUMN)?:[]);
+        $lock=$pdo->prepare("SELECT id,lockedAt FROM transactions WHERE id IN ($ph) FOR UPDATE");$lock->execute($ids);
+        $lockedRows=$lock->fetchAll(PDO::FETCH_ASSOC)?:[];
+        $found=array_map(static fn($row)=>strval($row['id']),$lockedRows);
         if(!empty($options['requireAll']) && count(array_unique($found))!==count($ids))throw new RuntimeException('Salah satu transaksi target mutasi tidak ditemukan.');
+        if(!empty($options['requireUnlocked'])){
+            $lockedIds=[];
+            foreach($lockedRows as $row)if(trim((string)($row['lockedAt']??''))!=='')$lockedIds[]=(string)$row['id'];
+            if($lockedIds)throw new DomainException('Transaksi terkunci tidak dapat diubah: '.implode(', ',array_unique($lockedIds)).'.');
+        }
     }
 
     $sets=[];$params=[];

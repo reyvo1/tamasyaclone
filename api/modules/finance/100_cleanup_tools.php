@@ -227,15 +227,20 @@ function buildOtaCleanupAdjustments(PDO $pdo, array $receivableTransactionIds, b
     $stmt=$pdo->prepare($sql);$stmt->execute($receivableTransactionIds);$rows=$stmt->fetchAll(PDO::FETCH_ASSOC)?:[];
     $groups=[];
     foreach($rows as $row){$groups[(string)$row['disbursement_id']][]=$row;}
+    $commissionStmt=$pdo->prepare("SELECT id FROM transactions WHERE sourceEntity='ota_disbursement' AND sourceEntityId=? AND transactionKind='ota_commission' ORDER BY createdAt,id LIMIT 1".($lock?' FOR UPDATE':''));
     $adjustments=[];$affected=[];
     foreach($groups as $disbursementId=>$items){
         $selectedAmount=array_sum(array_map(static fn($r)=>(float)$r['allocated_amount'],$items));
         $total=(float)$items[0]['disbursement_amount'];$remaining=max(0.0,$total-$selectedAmount);
         $source=(string)$items[0]['source_transaction_id'];$dest=(string)$items[0]['destination_transaction_id'];
+        $commissionStmt->execute([$disbursementId]);
+        $commission=trim((string)($commissionStmt->fetchColumn()?:''));
         $affected[]=$source;$affected[]=$dest;
+        if($commission!=='')$affected[]=$commission;
         $adjustments[]=[
             'disbursementId'=>$disbursementId,'selectedAmount'=>$selectedAmount,'originalAmount'=>$total,'remainingAmount'=>$remaining,
             'action'=>$remaining<=0.005?'delete':'reduce','sourceTransactionId'=>$source,'destinationTransactionId'=>$dest,
+            'commissionTransactionId'=>$commission!==''?$commission:null,
             'receivableTransactionIds'=>array_values(array_unique(array_map(static fn($r)=>(string)$r['receivable_transaction_id'],$items)))
         ];
     }

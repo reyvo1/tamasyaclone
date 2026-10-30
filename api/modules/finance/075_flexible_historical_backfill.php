@@ -189,13 +189,17 @@ function tamasyaRegisterHistoricalBackfillAdjustment(
           requires_tax_amendment=VALUES(requires_tax_amendment),review_status=VALUES(review_status),reason=VALUES(reason),
           source_type=VALUES(source_type),source_reference=VALUES(source_reference)");
     $sign = strtolower((string)($transaction['type'] ?? '')) === 'income' ? 1.0 : -1.0;
+    $baseRaw = $transaction['baseAmount'] ?? $transaction['base_amount'] ?? null;
+    $taxRaw = $transaction['taxAmount'] ?? $transaction['tax_amount'] ?? null;
+    $taxBaseUnresolved = ($baseRaw === null || $baseRaw === '');
     $cashDelta = array_key_exists('cashDelta',$impact) ? (float)$impact['cashDelta'] : tamasyaHistoricalLiquidAmount($transaction);
-    $taxBaseDelta = array_key_exists('taxBaseDelta',$impact) ? (float)$impact['taxBaseDelta'] : $sign*(float)($transaction['baseAmount'] ?? 0);
-    $taxDelta = array_key_exists('taxDelta',$impact) ? (float)$impact['taxDelta'] : $sign*(float)($transaction['taxAmount'] ?? 0);
-    if (abs($cashDelta)<0.005 && abs($taxBaseDelta)<0.005 && abs($taxDelta)<0.005) return;
+    $taxBaseDelta = array_key_exists('taxBaseDelta',$impact) ? (float)$impact['taxBaseDelta'] : ($taxBaseUnresolved ? 0.0 : $sign*(float)$baseRaw);
+    $taxDelta = array_key_exists('taxDelta',$impact) ? (float)$impact['taxDelta'] : $sign*(float)($taxRaw ?? 0);
+    $requiresTaxAmendment = !empty($impact['requiresTaxAmendment']) || $taxBaseUnresolved;
+    if (abs($cashDelta)<0.005 && abs($taxBaseDelta)<0.005 && abs($taxDelta)<0.005 && !$requiresTaxAmendment) return;
     $stmt->execute([
         $id,$operationId,$txId,(string)($impact['periodKey'] ?? substr((string)($transaction['date'] ?? ''),0,7)),$impactStatus,
-        $cashDelta,$taxBaseDelta,$taxDelta,!empty($impact['requiresTaxAmendment'])?1:0,
+        $cashDelta,$taxBaseDelta,$taxDelta,$requiresTaxAmendment?1:0,
         (string)($impact['historicalReviewStatus'] ?? 'pending_review'),$reason,
         (string)($transaction['historicalSourceType'] ?? 'other'),$transaction['historicalSourceReference'] ?? null,
         $actor['id'] ?? null,currentStaffLabel($actor)
@@ -226,12 +230,14 @@ function tamasyaRegisterHistoricalBackfillEditAdjustments(
     $newPeriod=(string)$newImpact['periodKey'];
     $oldSign=$oldType==='income'?1.0:-1.0;
     $newSign=$newType==='income'?1.0:-1.0;
+    $oldBaseUnresolved = ($before['baseAmount'] ?? $before['base_amount'] ?? null) === null || ($before['baseAmount'] ?? $before['base_amount'] ?? '') === '';
+    $newBaseUnresolved = ($after['baseAmount'] ?? $after['base_amount'] ?? null) === null || ($after['baseAmount'] ?? $after['base_amount'] ?? '') === '';
     $oldCash=tamasyaHistoricalLiquidAmount($before);
     $newCash=tamasyaHistoricalLiquidAmount($after);
-    $oldBase=$oldSign*(float)($before['baseAmount']??0);
-    $newBase=$newSign*(float)($after['baseAmount']??0);
-    $oldTax=$oldSign*(float)($before['taxAmount']??0);
-    $newTax=$newSign*(float)($after['taxAmount']??0);
+    $oldBase=$oldSign*(float)($before['baseAmount'] ?? $before['base_amount'] ?? 0);
+    $newBase=$newSign*(float)($after['baseAmount'] ?? $after['base_amount'] ?? 0);
+    $oldTax=$oldSign*(float)($before['taxAmount'] ?? $before['tax_amount'] ?? 0);
+    $newTax=$newSign*(float)($after['taxAmount'] ?? $after['tax_amount'] ?? 0);
     $oldNeeds=in_array((string)$oldImpact['periodImpactStatus'],['reported_period_adjustment','closed_period_amendment'],true);
     $newNeeds=in_array((string)$newImpact['periodImpactStatus'],['reported_period_adjustment','closed_period_amendment'],true);
     $warnings=[];
@@ -242,7 +248,7 @@ function tamasyaRegisterHistoricalBackfillEditAdjustments(
             $impact['cashDelta']=$newCash-$oldCash;
             $impact['taxBaseDelta']=$newBase-$oldBase;
             $impact['taxDelta']=$newTax-$oldTax;
-            $impact['requiresTaxAmendment']=($oldType==='income'||$newType==='income')&&in_array((string)$impact['taxStatus'],['reported','closed'],true);
+            $impact['requiresTaxAmendment']=($oldType==='income'||$newType==='income')&&in_array((string)$impact['taxStatus'],['reported','closed'],true) || $oldBaseUnresolved || $newBaseUnresolved;
             tamasyaRegisterHistoricalBackfillAdjustment($pdo,$after,$impact,$actor,$reason,$operationId.'_delta');
             if(!empty($impact['warning']))$warnings[]=$impact['warning'];
         }
@@ -252,7 +258,7 @@ function tamasyaRegisterHistoricalBackfillEditAdjustments(
             $impact['cashDelta']=-$oldCash;
             $impact['taxBaseDelta']=-$oldBase;
             $impact['taxDelta']=-$oldTax;
-            $impact['requiresTaxAmendment']=$oldType==='income'&&in_array((string)$impact['taxStatus'],['reported','closed'],true);
+            $impact['requiresTaxAmendment']=$oldType==='income'&&in_array((string)$impact['taxStatus'],['reported','closed'],true) || $oldBaseUnresolved;
             $oldPseudo=$before;
             $oldPseudo['id']=$after['id']??$before['id']??'';
             tamasyaRegisterHistoricalBackfillAdjustment($pdo,$oldPseudo,$impact,$actor,'Pemindahan dari '.$oldPeriod.': '.$reason,$operationId.'_from_'.$oldPeriod);
@@ -263,7 +269,7 @@ function tamasyaRegisterHistoricalBackfillEditAdjustments(
             $impact['cashDelta']=$newCash;
             $impact['taxBaseDelta']=$newBase;
             $impact['taxDelta']=$newTax;
-            $impact['requiresTaxAmendment']=$newType==='income'&&in_array((string)$impact['taxStatus'],['reported','closed'],true);
+            $impact['requiresTaxAmendment']=$newType==='income'&&in_array((string)$impact['taxStatus'],['reported','closed'],true) || $newBaseUnresolved;
             tamasyaRegisterHistoricalBackfillAdjustment($pdo,$after,$impact,$actor,'Pemindahan ke '.$newPeriod.': '.$reason,$operationId.'_to_'.$newPeriod);
             if(!empty($impact['warning']))$warnings[]=$impact['warning'];
         }
