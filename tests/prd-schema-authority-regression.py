@@ -18,10 +18,10 @@ def check(name,fn):
 
 def canonical_objects():
     tables,triggers,files=mod.parse_schema_files([ROOT/'database_setup.sql'])
-    assert len(tables)==131,(len(tables),sorted(tables)[:5])
+    assert len(tables)==133,(len(tables),sorted(tables)[:5])
     assert len(triggers)==5,(len(triggers),triggers)
-    assert files[0]["tables"]==131 and files[0]["triggers"]==5
-check('canonical backtick schema parses 131 tables and 5 trigger signatures',canonical_objects)
+    assert files[0]["tables"]==133 and files[0]["triggers"]==5
+check('canonical backtick schema parses 133 tables and 5 trigger signatures',canonical_objects)
 
 def hq_objects():
     tables,triggers,files=mod.parse_schema_files([ROOT/'hq/schema.sql',ROOT/'hq/delivery_schema.sql'])
